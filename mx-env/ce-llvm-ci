@@ -1,0 +1,6 @@
+# GraalVM CE + LLVM toolchain + Sulong + Native Image LLVM backend (gha-graal CI env)
+# Unknown components (e.g. svml on Windows, where mx does not register it) only produce a warning.
+DYNAMIC_IMPORTS=/sdk,/truffle,/compiler,/substratevm,/sulong
+COMPONENTS=antlr4,cmp,gvm,lg,llp,llrc,llrl,llrlf,llrn,nfi,nfi-libffi,ni,nic,nil,sdkni,svm,svmjdwp,svml,svmsl,svmt,tfl,tfla,tflc,tflm,tflsm
+NATIVE_IMAGES=lib:jvmcicompiler,lib:llvmvm,lib:native-image-agent,lib:native-image-diagnostics-agent,native-image,graalvm-native-binutil,graalvm-native-clang,graalvm-native-clang-cl,graalvm-native-clang++,graalvm-native-ld
+NON_REBUILDABLE_IMAGES=lib:jvmcicompiler
