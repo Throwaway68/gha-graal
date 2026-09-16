@@ -17,6 +17,11 @@ on:
         description: 'Create the GitHub release'
         default: true
         type: boolean
+      platforms:
+        description: 'Comma-separated subset of linux-amd64,darwin-aarch64,windows-amd64 to build'
+        default: 'linux-amd64,darwin-aarch64,windows-amd64'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -27,6 +32,7 @@ env:
 jobs:
   build:
     name: ${{ matrix.platform }}
+    if: ${{ contains(format(',{0},', inputs.platforms), format(',{0},', matrix.platform)) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     strategy:
