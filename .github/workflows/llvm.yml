@@ -30,18 +30,30 @@ env:
   SCCACHE_GHA_ENABLED: 'true'
 
 jobs:
+  plan:
+    name: Select platforms
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - id: select
+        shell: bash
+        run: |
+          all='[{"os":"ubuntu-22.04","platform":"linux-amd64"},{"os":"macos-14","platform":"darwin-aarch64"},{"os":"windows-2022","platform":"windows-amd64"}]'
+          sel=$(jq -c --arg p ',${{ inputs.platforms }},' '[.[] | select($p | contains("," + .platform + ","))]' <<<"$all")
+          echo "matrix=$sel" >> "$GITHUB_OUTPUT"
+          echo "building: $sel"
+          [ "$sel" != "[]" ] || { echo "no platform selected" >&2; exit 1; }
+
   build:
     name: ${{ matrix.platform }}
-    if: ${{ contains(format(',{0},', inputs.platforms), format(',{0},', matrix.platform)) }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-22.04, platform: linux-amd64 }
-          - { os: macos-14, platform: darwin-aarch64 }
-          - { os: windows-2022, platform: windows-amd64 }
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout gha-graal
         uses: actions/checkout@v7.0.1
