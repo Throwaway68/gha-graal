@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           all='[{"os":"ubuntu-22.04","platform":"linux-amd64"},{"os":"macos-14","platform":"darwin-aarch64"},{"os":"windows-2022","platform":"windows-amd64"}]'
-          sel=$(jq -c --arg p ',${{ inputs.platforms }},' '[.[] | select($p | contains("," + .platform + ","))]' <<<"$all")
+          sel=$(jq -c --arg p ',${{ inputs.platforms }},' '[.[] | select(.platform as $x | $p | contains("," + $x + ","))]' <<<"$all")
           echo "matrix=$sel" >> "$GITHUB_OUTPUT"
           echo "building: $sel"
           [ "$sel" != "[]" ] || { echo "no platform selected" >&2; exit 1; }
