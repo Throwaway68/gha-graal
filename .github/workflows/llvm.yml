@@ -1,0 +1,119 @@
+name: LLVM toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_ref:
+        description: 'Ref in Throwaway68/llvm-project to build'
+        default: 'graal/22.1.8'
+        required: true
+        type: string
+      version:
+        description: 'Version label used in asset names; the release tag is llvm-<version>'
+        default: '22.1.8-graal.1'
+        required: true
+        type: string
+      publish:
+        description: 'Create the GitHub release'
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  SCCACHE_GHA_ENABLED: 'true'
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, platform: linux-amd64 }
+          - { os: macos-14, platform: darwin-aarch64 }
+          - { os: windows-2022, platform: windows-amd64 }
+    steps:
+      - name: Checkout gha-graal
+        uses: actions/checkout@v7.0.1
+        with:
+          path: ci
+      - name: Checkout llvm-project
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: Throwaway68/llvm-project
+          ref: ${{ inputs.llvm_ref }}
+          path: llvm-project
+          fetch-depth: 1
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build lld
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Windows MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: Windows dependencies
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress -y
+      - name: Build
+        shell: bash
+        run: bash ci/scripts/llvm/build.sh "${{ matrix.platform }}" "$GITHUB_WORKSPACE/llvm-project" "$GITHUB_WORKSPACE/llvm-install" "$GITHUB_WORKSPACE/llvm-install-crt"
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
+      - name: Package
+        shell: bash
+        run: bash ci/scripts/llvm/package.sh "${{ matrix.platform }}" "${{ inputs.version }}" "$GITHUB_WORKSPACE/llvm-install" "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/llvm-project" "$GITHUB_WORKSPACE/llvm-install-crt"
+      - name: Upload
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: llvm-${{ matrix.platform }}
+          path: out/*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Release llvm-${{ inputs.version }}
+    needs: build
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout gha-graal
+        uses: actions/checkout@v7.0.1
+        with:
+          path: ci
+      - name: Download all bundles
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: llvm-*
+          merge-multiple: true
+          path: assets
+      - name: Write manifest
+        run: |
+          python3 ci/scripts/release_tools.py manifest assets --version "${{ inputs.version }}" > manifest.json
+          mv manifest.json assets/
+          cat assets/manifest.json
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          LLVM toolchain for GraalVM, built from \`Throwaway68/llvm-project@${{ inputs.llvm_ref }}\`
+          (llvmorg-22.1.8 + graal patches). Projects: clang, lld. Targets: X86, AArch64.
+          Runtimes (linux/darwin): compiler-rt builtins, libunwind, libc++abi, libc++.
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          gh release create "llvm-${{ inputs.version }}" assets/* \
+            --repo "${{ github.repository }}" \
+            --title "LLVM ${{ inputs.version }}" \
+            --notes-file notes.md
