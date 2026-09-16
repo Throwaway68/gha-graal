@@ -137,7 +137,8 @@ Steps per platform:
    - `DYNAMIC_IMPORTS=/sdk,/truffle,/compiler,/substratevm,/sulong`
    - `COMPONENTS=` CE base (`cmp,gvm,lg,ni,nic,nil,sdkni,svm,svmjdwp,svmt,svmsl,tflc,tflsm`)
      plus `llp,llrc,llrl,llrn,llrlf,antlr4,svml`
-   - `NATIVE_IMAGES=lib:jvmcicompiler,lib:native-image-agent,lib:native-image-diagnostics-agent,native-image,lli,graalvm-native-binutil,graalvm-native-clang,graalvm-native-clang-cl,graalvm-native-clang++,graalvm-native-ld`
+   - `NATIVE_IMAGES=lib:jvmcicompiler,lib:llvmvm,lib:native-image-agent,lib:native-image-diagnostics-agent,native-image,graalvm-native-binutil,graalvm-native-clang,graalvm-native-clang-cl,graalvm-native-clang++,graalvm-native-ld`
+     (`lli` is a thin launcher over the `lib:llvmvm` language library)
    - `NON_REBUILDABLE_IMAGES=lib:jvmcicompiler`
    Since mx aborts on unknown component names, the workflow strips `svml`
    from the component list on platforms where `mx graalvm-components`
