@@ -20,3 +20,7 @@ tests/programs/hello/Hello.java
 tests/programs/hello/expected.txt
 scripts/graalvm/dev-run.sh
 tests/test_dev_run.sh
+scripts/llvm/build-unwind-win.sh
+.github/workflows/spike-win-eh.yml
+tests/spike/win-eh/lsda.ll
+tests/spike/win-eh/unwindtest.c

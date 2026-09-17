@@ -1,0 +1,109 @@
+name: Spike Windows EH
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_release:
+        description: 'LLVM release providing the Windows bundle and the source tarball'
+        default: 'llvm-22.1.8-graal.1'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    name: libunwind SEH + Win64 LSDA
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout gha-graal
+        uses: actions/checkout@v7.0.1
+        with:
+          path: ci
+      - name: Windows MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: Windows dependencies
+        run: choco install ninja --no-progress -y
+      - name: Fetch LLVM bundle and source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.llvm_release }}" --repo "${{ github.repository }}" \
+            --pattern 'llvm-*-windows-amd64.tar.gz' --pattern 'llvm-src-*.tar.gz' --dir dl
+          mkdir -p llvm llvm-src
+          # Only bin/ and the clang resource headers are needed; skipping lib/*.lib saves minutes.
+          tar -xzf dl/llvm-*-windows-amd64.tar.gz -C llvm bin lib/clang ||
+            tar -xzf dl/llvm-*-windows-amd64.tar.gz -C llvm
+          tar -xzf dl/llvm-src-*.tar.gz -C llvm-src
+          ls llvm/bin/clang.exe llvm/bin/llc.exe llvm/bin/llvm-nm.exe
+          ls llvm-src
+      - name: 1. LSDA emission with the msvc triple
+        shell: bash
+        run: |
+          BIN=$GITHUB_WORKSPACE/llvm/bin
+          cd ci/tests/spike/win-eh
+          "$BIN/llc" -O2 -filetype=obj -o lsda.obj lsda.ll
+          "$BIN/llc" -O2 -filetype=asm -o lsda.s lsda.ll
+          "$BIN/llvm-readobj" --unwind lsda.obj | tee unwind.txt
+          "$BIN/llvm-readobj" --relocations lsda.obj | tee relocs.txt
+          "$BIN/llvm-objdump" -s -j .xdata lsda.obj | tee xdata.txt
+          "$BIN/llvm-readobj" --sections lsda.obj | grep -E 'Name:' | sort | uniq -c
+          echo "== handler data in the assembly"
+          sed -n '/seh_handlerdata/,$p' lsda.s > handlerdata.txt
+          head -40 handlerdata.txt
+          grep -q '__svm_seh_personality' relocs.txt && echo "personality relocated into .xdata: yes"
+          grep -q 'Call site Encoding' handlerdata.txt && echo "Itanium LSDA (GCC except table) emitted: yes"
+          grep -E 'Flags|Handler' unwind.txt | head -8 || true
+      - name: 2. Build libunwind (SEH)
+        shell: bash
+        run: bash ci/scripts/llvm/build-unwind-win.sh "$GITHUB_WORKSPACE/llvm-src" "$GITHUB_WORKSPACE/llvm" "$GITHUB_WORKSPACE/unwind-out"
+      - name: 3. Link and run against the MSVC CRT
+        shell: bash
+        env:
+          MSYS2_ARG_CONV_EXCL: '*'
+        run: |
+          # cl and link accept '-' options; '/' options would be mangled by MSYS path conversion.
+          LIBDIR=$(cygpath -m "$GITHUB_WORKSPACE")/unwind-out/lib/x86_64-w64-windows-gnu
+          cd ci/tests/spike/win-eh
+          echo "== link against libunwind.a"
+          if cl -nologo -MD -O2 unwindtest.c -Fe:unwindtest-a.exe \
+               -link -INCREMENTAL:NO -NODEFAULTLIB:LIBCMT "$LIBDIR/libunwind.a" kernel32.lib ntdll.lib; then
+            echo "DOT_A_ACCEPTED_BY_LINK_EXE: yes"; A_OK=1
+          else
+            echo "DOT_A_ACCEPTED_BY_LINK_EXE: no"; A_OK=0
+          fi
+          echo "== link against unwind.lib (same archive, renamed)"
+          cl -nologo -MD -O2 unwindtest.c -Fe:unwindtest.exe \
+             -link -INCREMENTAL:NO -NODEFAULTLIB:LIBCMT "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib
+          echo "== run"
+          ./unwindtest.exe | tee run.txt
+          grep -q 'SPIKE OK' run.txt
+          echo "dot-a accepted: $A_OK" | tee -a run.txt
+      - name: 4. Toolchain launch without the .exe suffix
+        shell: bash
+        run: |
+          # Java's ProcessBuilder resolves extension-less absolute paths through CreateProcess,
+          # which appends .exe; python's subprocess goes through the same call.
+          python - <<'PY'
+          import os, subprocess
+          exe = os.path.join(os.environ['GITHUB_WORKSPACE'], 'llvm', 'bin', 'llc')
+          print('launching', exe)
+          r = subprocess.run([exe, '--version'], capture_output=True, text=True)
+          print('returncode', r.returncode)
+          print('\n'.join(r.stdout.splitlines()[:3]))
+          raise SystemExit(r.returncode)
+          PY
+      - name: Upload spike output
+        uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: spike-win-eh
+          path: |
+            ci/tests/spike/win-eh/*.txt
+            ci/tests/spike/win-eh/*.obj
+            ci/tests/spike/win-eh/*.s
+            unwind-out/**
