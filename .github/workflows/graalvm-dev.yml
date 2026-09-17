@@ -228,7 +228,7 @@ jobs:
           t0 = time.time()
           roots = [os.path.join('graal', d, 'mxbuild') for d in os.listdir('graal')]
           roots = [r for r in roots if os.path.isdir(r)] + [r for r in ['mx/mxbuild'] if os.path.isdir(r)]
-          native_src = ('.c', '.cc', '.cpp', '.cxx', '.h', '.hpp', '.hh', '.inc', '.s', '.asm')
+          generated_src = ('gensrc', 'jni_gen')
           def touch(p):
               try:
                   os.utime(p, (stamp, stamp))
@@ -248,16 +248,15 @@ jobs:
                       dirnames[:] = []
                       ninja += touch(os.path.join(dirpath, 'build.ninja'))
                       continue
+                  # The native sources mx generates into mxbuild (gensrc/JvmFuncsFallbacks.c,
+                  # jni_gen/*.h) are ninja inputs whose objects keep their old mtimes above, so
+                  # they have to stay behind as well ("ninja explain: output
+                  # .../JvmFuncsFallbacks.obj older than most recent input .../JvmFuncsFallbacks.c",
+                  # run 35228721057). Only those directories: headers elsewhere in mxbuild are
+                  # ordinary outputs that mx does compare (skipping them made com.oracle.svm.core
+                  # recompile over its own bin/.../sharedGCStructs.h in run 35229643502).
+                  dirnames[:] = [d for d in dirnames if d not in generated_src]
                   for name in dirnames + filenames:
-                      # Native sources and headers generated into mxbuild (jni_gen/*.h,
-                      # gensrc/*.c) are ninja inputs, and their objects keep the old mtimes
-                      # above, so these have to stay behind as well ("ninja explain: output
-                      # jdk25/svm-jvmfuncs-fallback-builder/gensrc/JvmFuncsFallbacks.obj older
-                      # than most recent input ...JvmFuncsFallbacks.c", run 35228721057). The
-                      # others of that kind in mxbuild are pure outputs (the toolchain's and the
-                      # GraalVM's headers), which nothing compares against.
-                      if name.lower().endswith(native_src):
-                          continue
                       n += touch(os.path.join(dirpath, name))
               n += touch(root)
           print(f'stamped {n} restored build outputs (and {ninja} build.ninja, keeping their '
