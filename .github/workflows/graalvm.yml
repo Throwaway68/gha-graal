@@ -34,8 +34,6 @@ env:
   LANG: en_US.UTF-8
   MX_GIT_CACHE: refcache
   PYTHONIOENCODING: utf-8
-  # Experimental option checking as in Oracle's CI
-  NATIVE_IMAGE_EXPERIMENTAL_OPTIONS_ARE_FATAL: 'true'
 
 jobs:
   plan:

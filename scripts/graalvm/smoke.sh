@@ -47,7 +47,9 @@ if [ -d "$H/lib/svm/tools/llvm-backend" ] || [ -d "$H/lib/svm/macros/llvm-backen
 public class Hello { public static void main(String[] a) { System.out.println("Hello from the LLVM backend"); } }
 EOJ
   "$JAVAC" Hello.java
-  "$NI" --tool:llvm-backend -cp . Hello -o hello-llvm
+  # The backend macro sets the experimental -H:CompilerBackend=llvm option.
+  unset NATIVE_IMAGE_EXPERIMENTAL_OPTIONS_ARE_FATAL
+  "$NI" -H:+UnlockExperimentalVMOptions --tool:llvm-backend -cp . Hello -o hello-llvm
   ./hello-llvm | tee ni.out
   grep -q 'Hello from the LLVM backend' ni.out
   echo "LLVM backend: tested"
