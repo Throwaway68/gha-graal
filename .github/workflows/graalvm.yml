@@ -5,12 +5,12 @@ on:
     inputs:
       graal_ref:
         description: 'Ref in Throwaway68/graal to build'
-        default: 'graal/25.3.4.1-ci'
+        default: 'graal/25.3.4.1-win-llvm'
         required: true
         type: string
       llvm_release:
         description: 'Release tag in this repo providing the LLVM bundles (llvm-<version>)'
-        default: 'llvm-22.1.8-graal.1'
+        default: 'llvm-22.1.8-graal.3'
         required: true
         type: string
       label:
@@ -181,18 +181,99 @@ jobs:
           label='${{ inputs.label }}'
           if [ -z "$label" ]; then label="${{ inputs.graal_ref }}-${{ inputs.llvm_release }}"; fi
           echo "LABEL=${label//\//-}" >> "$GITHUB_ENV"
-      - name: Write manifest and create release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Write manifest
         run: |
           python3 ci/scripts/release_tools.py manifest assets --version "$LABEL" > manifest.json
           mv manifest.json assets/
+          cat assets/manifest.json
+      # The archives are ~1 GB each and uploads.github.com answers "HTTP 500: Error
+      # saving asset" often enough that a single `gh release create <tag> assets/*`
+      # is a coin flip - and when one upload fails, gh deletes the whole release.
+      # So (as in llvm.yml): create the release empty and as a draft, upload the
+      # assets one by one with retries, verify every one of them against the local
+      # file, and only then publish.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          tag="graalvm-$LABEL"
+          if state=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$state" != "true" ]; then
+              echo "::error::release $tag already exists and is published; pick a new label instead of overwriting it"
+              exit 1
+            fi
+            echo "reusing the existing draft $tag"
+            exit 0
+          fi
           cat > notes.md <<EOF
           GraalVM CE built from \`Throwaway68/graal@${{ inputs.graal_ref }}\` with the LLVM toolchain from release \`${{ inputs.llvm_release }}\`.
-          Components: CE base, LLVM.org toolchain, Sulong (LLVM runtime), Native Image LLVM backend where the build system registers it (linux-amd64, darwin-aarch64 on the CI branch; not on Windows).
+          Platforms in this release: ${{ inputs.platforms }}.
+          Components: CE base, LLVM.org toolchain, Sulong (LLVM runtime), Native Image LLVM backend where the branch registers it.
+          Native Image LLVM backend: linux-amd64, windows-amd64 (round 1, hello world), darwin-aarch64 (moduleName fix for GR-34811, not yet green).
+          The Windows backend needs \`llvm-22.1.8-graal.3\` or newer: it carries the Win64 home-space fix for \`CallingConv::GRAAL\` and libunwind for \`x86_64-w64-windows-gnu\`.
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
-          gh release create "graalvm-$LABEL" assets/* \
+          gh release create "$tag" \
             --repo "${{ github.repository }}" \
             --title "GraalVM $LABEL" \
-            --notes-file notes.md
+            --notes-file notes.md \
+            --draft
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          tag="graalvm-$LABEL"
+          rc=0
+          for f in assets/*; do
+            uploaded=no
+            for attempt in 1 2 3 4 5 6; do
+              echo "== uploading $(basename "$f") ($(stat -c%s "$f") bytes), attempt $attempt/6"
+              if gh release upload "$tag" "$f" --repo "${{ github.repository }}" --clobber; then
+                uploaded=yes
+                break
+              fi
+              echo "attempt $attempt for $(basename "$f") failed"
+              if [ "$attempt" -lt 6 ]; then
+                sleep 60
+              fi
+            done
+            if [ "$uploaded" != yes ]; then
+              echo "::error::$(basename "$f") could not be uploaded in 6 attempts"
+              rc=1
+            fi
+          done
+          exit $rc
+      - name: Verify assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          tag="graalvm-$LABEL"
+          gh release view "$tag" --repo "${{ github.repository }}" --json assets > published.json
+          jq '[.assets[] | {name, size, state}]' published.json
+          rc=0
+          for f in assets/*; do
+            name=$(basename "$f")
+            want=$(stat -c%s "$f")
+            got=$(jq -r --arg n "$name" 'first(.assets[] | select(.name == $n) | .size) // "missing"' published.json)
+            state=$(jq -r --arg n "$name" 'first(.assets[] | select(.name == $n) | .state) // "missing"' published.json)
+            if [ "$got" != "$want" ]; then
+              echo "::error::$name: published size $got, expected $want"
+              rc=1
+            elif [ "$state" != "uploaded" ]; then
+              echo "::error::$name: asset state is '$state', expected 'uploaded'"
+              rc=1
+            else
+              echo "ok $name ($want bytes)"
+            fi
+          done
+          exit $rc
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "graalvm-$LABEL" --repo "${{ github.repository }}" --draft=false
+          gh release view "graalvm-$LABEL" --repo "${{ github.repository }}" --json url,isDraft,assets \
+            -q '.url, .isDraft, ([.assets[].name] | join(" "))'
