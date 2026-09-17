@@ -26,3 +26,6 @@ tests/spike/win-eh/lsda.ll
 tests/spike/win-eh/unwindtest.c
 scripts/llvm/coff-assoc-comdats.py
 tests/test_coff_assoc_comdats.py
+scripts/jars/shadow.py
+tests/test_shadow.py
+.github/workflows/jars.yml

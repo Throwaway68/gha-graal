@@ -28,6 +28,16 @@ Builds any graal ref against the LLVM release: graal's downloads from
 `graalvm-<label>` with a `.tar.gz` per Unix platform, a `.zip` for Windows,
 and `manifest.json`.
 
+**Shadowed jars** (`jars.yml`): `gh workflow run jars.yml -f version=1.5.7-graal.1`.
+Rebuilds the JavaCPP 1.5.7 and LLVM 13.0.1-1.5.7 **windows-x86_64** platform jars from
+Maven Central as graal-style *shadowed* jars (`org.bytedeco` relocated to
+`com.oracle.svm.shadowed.org.bytedeco`, `open module
+com.oracle.svm.shadowed.org.bytedeco.{javacpp,llvm}.windows.x86_64` in
+`META-INF/versions/9`), the same shape as Oracle's linux/macOS jars. Publishes release
+`jars-<version>` with the two jars and `manifest.json` (sha512); graal's
+`LLVM_PLATFORM_SPECIFIC_SHADOWED` / `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` windows-amd64
+entries point at those URLs. The relocation itself is `scripts/jars/shadow.py`.
+
 ## Building your own branches
 
 1. Push a branch to `Throwaway68/graal` (any base). Run `graalvm.yml` with `graal_ref=<branch>`.

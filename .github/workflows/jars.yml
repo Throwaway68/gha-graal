@@ -1,0 +1,96 @@
+name: Shadowed jars
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release label; the release tag is jars-<version>'
+        default: '1.5.7-graal.1'
+        required: true
+        type: string
+      publish:
+        description: 'Create the GitHub release'
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  MAVEN: https://repo1.maven.org/maven2/org/bytedeco
+  LAFO: https://lafo.ssw.uni-linz.ac.at/pub/graal-external-deps/native-image
+  LLVM_VER: 13.0.1-1.5.7
+  JAVACPP_VER: 1.5.7
+
+jobs:
+  jars:
+    name: windows-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout gha-graal
+        uses: actions/checkout@v7.0.1
+        with:
+          path: ci
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download inputs
+        run: |
+          mkdir -p in base out
+          curl -fsSL -o in/llvm-windows-x86_64.jar    "$MAVEN/llvm/$LLVM_VER/llvm-$LLVM_VER-windows-x86_64.jar"
+          curl -fsSL -o in/javacpp-windows-x86_64.jar "$MAVEN/javacpp/$JAVACPP_VER/javacpp-$JAVACPP_VER-windows-x86_64.jar"
+          curl -fsSL -o base/llvm-shadowed.jar    "$LAFO/llvm-shadowed-$LLVM_VER.jar"
+          curl -fsSL -o base/javacpp-shadowed.jar "$LAFO/javacpp-shadowed-$JAVACPP_VER.jar"
+          ls -la in base
+      - name: Shadow
+        run: |
+          python3 ci/scripts/jars/shadow.py in/javacpp-windows-x86_64.jar "out/javacpp-shadowed-${{ inputs.version }}-windows-x86_64.jar" \
+            --module com.oracle.svm.shadowed.org.bytedeco.javacpp.windows.x86_64 \
+            --requires com.oracle.svm.shadowed.org.bytedeco.javacpp --base-jar base/javacpp-shadowed.jar
+          python3 ci/scripts/jars/shadow.py in/llvm-windows-x86_64.jar "out/llvm-shadowed-13.0.1-${{ inputs.version }}-windows-x86_64.jar" \
+            --module com.oracle.svm.shadowed.org.bytedeco.llvm.windows.x86_64 \
+            --requires com.oracle.svm.shadowed.org.bytedeco.llvm --base-jar base/llvm-shadowed.jar --base-jar base/javacpp-shadowed.jar
+      - name: Verify
+        run: |
+          check() {  # <jar> <expected module name>
+            echo "== $1"
+            jar --describe-module --file "$1" --release 9 | tee desc.txt
+            grep -q "^$2 .* open$" desc.txt || { echo "wrong module descriptor in $1" >&2; exit 1; }
+            unzip -Z1 "$1" > names.txt
+            if grep -E '^(org/bytedeco/|META-INF/(native-image|maven)/)' names.txt; then
+              echo "unshadowed entries in $1" >&2; exit 1
+            fi
+            grep -q '^com/oracle/svm/shadowed/org/bytedeco/' names.txt || { echo "nothing relocated in $1" >&2; exit 1; }
+          }
+          check "out/javacpp-shadowed-${{ inputs.version }}-windows-x86_64.jar" com.oracle.svm.shadowed.org.bytedeco.javacpp.windows.x86_64
+          check "out/llvm-shadowed-13.0.1-${{ inputs.version }}-windows-x86_64.jar" com.oracle.svm.shadowed.org.bytedeco.llvm.windows.x86_64
+          rm -f desc.txt names.txt
+      - name: Write manifest
+        run: |
+          python3 ci/scripts/release_tools.py manifest out --version "${{ inputs.version }}" > manifest.json
+          mv manifest.json out/
+          cat out/manifest.json
+          ls -la out
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: jars
+          path: out/*
+      - name: Create release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          JavaCPP ${JAVACPP_VER} and LLVM presets ${LLVM_VER} platform jars for windows-x86_64, taken from
+          Maven Central, relocated from \`org.bytedeco\` to \`com.oracle.svm.shadowed.org.bytedeco\` and given
+          \`open module com.oracle.svm.shadowed.org.bytedeco.{javacpp,llvm}.windows.x86_64\` descriptors, the
+          same shape as Oracle's linux/macOS shadowed jars. For graal's LLVM_PLATFORM_SPECIFIC_SHADOWED and
+          JAVACPP_PLATFORM_SPECIFIC_SHADOWED on windows-amd64 (Native Image LLVM backend).
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          gh release create "jars-${{ inputs.version }}" out/* \
+            --repo "${{ github.repository }}" \
+            --title "Shadowed JavaCPP jars ${{ inputs.version }}" \
+            --notes-file notes.md
