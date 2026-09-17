@@ -74,16 +74,16 @@ jobs:
           LIBDIR=$(cygpath -m "$GITHUB_WORKSPACE")/unwind-out/lib/x86_64-w64-windows-gnu
           cd ci/tests/spike/win-eh
           try_link() { cl -nologo -MD -O2 unwindtest.c -Fe:"$1" -link -INCREMENTAL:NO -NODEFAULTLIB:LIBCMT "${@:2}"; }
-          echo "== A: libunwind.a, no legacy_stdio_definitions"
-          if try_link probe-a.exe "$LIBDIR/libunwind.a" kernel32.lib ntdll.lib; then A=yes; else A=no; fi
-          echo "== B: unwind.lib, no legacy_stdio_definitions"
-          if try_link probe-lib.exe "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib; then B=yes; else B=no; fi
-          echo "== C: unwind.lib + legacy_stdio_definitions.lib"
-          if try_link probe-legacy.exe "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib legacy_stdio_definitions.lib; then C=yes; else C=no; fi
-          { echo "link accepts the .a extension: $A"
-            echo "link accepts unwind.lib: $B"
-            echo "link with legacy_stdio_definitions.lib: $C"; } | tee link.txt
-          EXE=probe-lib.exe; [ "$B" = yes ] || EXE=probe-legacy.exe
+          echo "== A: libunwind.a (does link.exe take the .a extension?)"
+          if try_link probe-a.exe "$LIBDIR/libunwind.a" kernel32.lib ntdll.lib legacy_stdio_definitions.lib; then A=yes; else A=no; fi
+          echo "== B: unwind.lib"
+          if try_link probe-lib.exe "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib legacy_stdio_definitions.lib; then B=yes; else B=no; fi
+          echo "== C: unwind.lib without legacy_stdio_definitions.lib (is it needed?)"
+          if try_link probe-nostdio.exe "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib; then C=yes; else C=no; fi
+          { echo "link.exe accepts the .a extension: $A"
+            echo "link.exe accepts unwind.lib: $B"
+            echo "links without legacy_stdio_definitions.lib: $C"; } | tee link.txt
+          EXE=probe-lib.exe; [ "$B" = yes ] || EXE=probe-a.exe
           [ -f "$EXE" ] || { echo "no test executable was produced" >&2; exit 1; }
           echo "== run $EXE"
           "./$EXE" | tee run.txt
