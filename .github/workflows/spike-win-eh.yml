@@ -38,9 +38,13 @@ jobs:
           # Only bin/ and the clang resource headers are needed; skipping lib/*.lib saves minutes.
           tar -xzf dl/llvm-*-windows-amd64.tar.gz -C llvm bin lib/clang ||
             tar -xzf dl/llvm-*-windows-amd64.tar.gz -C llvm
-          tar -xzf dl/llvm-src-*.tar.gz -C llvm-src
+          # Only the runtimes build's inputs; clang/test and llvm/utils carry symlinks
+          # that GNU tar cannot create on Windows, which fails the whole extraction.
+          tar -xzf dl/llvm-src-*.tar.gz -C llvm-src cmake runtimes libunwind llvm/cmake third-party ||
+            tar -xzf dl/llvm-src-*.tar.gz -C llvm-src || true
           ls llvm/bin/clang.exe llvm/bin/llc.exe llvm/bin/llvm-nm.exe
-          ls llvm-src
+          ls llvm-src/runtimes/CMakeLists.txt llvm-src/libunwind/CMakeLists.txt \
+             llvm-src/cmake/Modules/CMakePolicy.cmake llvm-src/llvm/cmake/modules/AddLLVM.cmake
       - name: 1. LSDA emission with the msvc triple
         shell: bash
         run: |
