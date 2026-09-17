@@ -13,3 +13,4 @@ scripts/graalvm/package.sh
 tests/test_release_tools.py
 tests/test_package_llvm.sh
 tests/test_package_graalvm.sh
+docs/superpowers/specs/2026-09-17-windows-llvm-backend-design.md
