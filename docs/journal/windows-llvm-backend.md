@@ -7,7 +7,9 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
 ## Milestones
 
 - 2026-09-17: Windows exception-handling spike green on windows-2022 (steps 1-4 of the plan's Task 2):
-  https://github.com/Throwaway68/gha-graal/actions/runs/35207963198
+  https://github.com/Throwaway68/gha-graal/actions/runs/35207963198, re-run green after the review fixes
+  (hard step-1 assertions, strict COFF rewriter):
+  https://github.com/Throwaway68/gha-graal/actions/runs/35209025076
 
 ## Findings
 
