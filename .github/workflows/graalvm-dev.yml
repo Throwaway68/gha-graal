@@ -1,0 +1,175 @@
+name: GraalVM dev
+
+# Fast iteration loop for the Windows LLVM backend: build a lean GraalVM (compiler,
+# SubstrateVM, native-image driver, LLVM backend tool, LLVM.org toolchain) from a graal
+# ref, build one program under tests/programs with `--tool:llvm-backend`, upload the
+# native-image work directory. `mxbuild` and the LabsJDK download are cached per
+# platform + JDK + graal SHA, so a re-run of the same commit starts from the last build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      graal_ref:
+        description: 'Ref in Throwaway68/graal'
+        default: 'graal/25.3.4.1-win-llvm'
+        required: true
+        type: string
+      llvm_release:
+        description: 'LLVM release tag in this repo'
+        default: 'llvm-22.1.8-graal.2'
+        required: true
+        type: string
+      platform:
+        description: 'One platform'
+        default: 'windows-amd64'
+        type: choice
+        options: [windows-amd64, linux-amd64, darwin-aarch64]
+      program:
+        description: 'Directory under tests/programs'
+        default: 'hello'
+        type: string
+      ni_args:
+        description: 'Extra native-image arguments'
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  LANG: en_US.UTF-8
+  MX_GIT_CACHE: refcache
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  dev:
+    name: ${{ inputs.platform }} / ${{ inputs.program }}
+    runs-on: ${{ inputs.platform == 'windows-amd64' && 'windows-2022' || inputs.platform == 'darwin-aarch64' && 'macos-14' || 'ubuntu-22.04' }}
+    timeout-minutes: 240
+    steps:
+      - name: Checkout gha-graal
+        uses: actions/checkout@v7.0.1
+        with:
+          path: ci
+      - name: Checkout graal
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: Throwaway68/graal
+          ref: ${{ inputs.graal_ref }}
+          path: graal
+          fetch-depth: 1
+      - name: Derive paths
+        shell: bash
+        run: |
+          echo "MX_PATH=$GITHUB_WORKSPACE/mx" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=$GITHUB_WORKSPACE/jdk" >> "$GITHUB_ENV"
+          echo "MX_VERSION=$(jq -r '.mx_version' graal/common.json)" >> "$GITHUB_ENV"
+          echo "JDK_ID=$(jq -r '.jdks["labsjdk-ce-latest"].version' graal/common.json)" >> "$GITHUB_ENV"
+          echo "GRAAL_SHA=$(git -C graal rev-parse HEAD)" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then echo "MX_PYTHON=python" >> "$GITHUB_ENV"; else echo "MX_PYTHON=python3" >> "$GITHUB_ENV"; fi
+      - name: Checkout mx
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: graalvm/mx
+          ref: ${{ env.MX_VERSION }}
+          path: mx
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build zlib1g-dev
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja cmake || true
+      - name: Windows MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      # restore/save instead of actions/cache@v4: the action's post step is `post-if:
+      # success()`, so a job that fails at dev-run (the expected Windows outcome until the
+      # backend works) would never save its build. Saving explicitly after the build keeps
+      # every iteration cached.
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            graal/*/mxbuild
+            jdk-dl
+          key: dev-${{ inputs.platform }}-${{ env.JDK_ID }}-${{ env.GRAAL_SHA }}
+          restore-keys: |
+            dev-${{ inputs.platform }}-${{ env.JDK_ID }}-
+            dev-${{ inputs.platform }}-
+      - name: Cache state
+        shell: bash
+        run: |
+          echo "primary key: ${{ steps.cache.outputs.cache-primary-key }}"
+          echo "matched key: ${{ steps.cache.outputs.cache-matched-key }}"
+          echo "exact hit:   ${{ steps.cache.outputs.cache-hit }}"
+      - name: Fetch LabsJDK
+        shell: bash
+        # Run inside the graal checkout so mx resolves labsjdk-ce-latest from graal/common.json.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/jdk-dl"
+          cd graal
+          "$MX_PATH/mx" --java-home= fetch-jdk --jdk-id labsjdk-ce-latest --to "$GITHUB_WORKSPACE/jdk-dl" --alias "$JAVA_HOME"
+          if [ -d "$JAVA_HOME/Contents/Home" ]; then echo "JAVA_HOME=$JAVA_HOME/Contents/Home" >> "$GITHUB_ENV"; fi
+      - name: Point graal at our LLVM release (MX_URLREWRITES)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.llvm_release }}" --repo "${{ github.repository }}" --pattern manifest.json --dir llvm-release --clobber
+          python3 ci/scripts/release_tools.py urlrewrites llvm-release/manifest.json \
+            "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ inputs.llvm_release }}" > urlrewrites.json
+          echo "MX_URLREWRITES=$GITHUB_WORKSPACE/urlrewrites.json" >> "$GITHUB_ENV"
+      - name: Install env file
+        shell: bash
+        run: cp ci/mx-env/ce-llvm-dev graal/vm/mx.vm/ce-llvm-dev
+      - name: Build (Linux/macOS)
+        id: build_unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd graal/vm
+          "$MX_PATH/mx" --env ce-llvm-dev graalvm-show
+          "$MX_PATH/mx" --env ce-llvm-dev build
+          echo "GRAALVM_HOME=$("$MX_PATH/mx" --env ce-llvm-dev graalvm-home)" >> "$GITHUB_ENV"
+      - name: Build (Windows)
+        id: build_win
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cd graal\vm
+          call %MX_PATH%\mx.cmd --env ce-llvm-dev graalvm-show
+          call %MX_PATH%\mx.cmd --env ce-llvm-dev build
+          call %MX_PATH%\mx.cmd --env ce-llvm-dev graalvm-home > graalvm-home.txt
+          set /p GRAALVM_HOME=<graalvm-home.txt
+          echo GRAALVM_HOME=%GRAALVM_HOME%>>%GITHUB_ENV%
+      - name: Save build cache
+        if: always() && steps.cache.outputs.cache-hit != 'true' && (steps.build_unix.outcome == 'success' || steps.build_win.outcome == 'success')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            graal/*/mxbuild
+            jdk-dl
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: dev-run
+        shell: bash
+        run: bash ci/scripts/graalvm/dev-run.sh "$GRAALVM_HOME" "ci/tests/programs/${{ inputs.program }}" "$GITHUB_WORKSPACE/work" ${{ inputs.ni_args }}
+      - name: Upload work directory
+        uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: dev-${{ inputs.platform }}-${{ inputs.program }}
+          path: |
+            work/stdout.txt
+            work/stderr.txt
+            work/tmp/**/llvm/*.o
+            work/tmp/**/llvm/*.obj
+            work/tmp/**/llvm/win*.bc
+            work/tmp/**/reports/**
+          if-no-files-found: ignore

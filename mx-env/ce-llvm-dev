@@ -1,0 +1,17 @@
+# Lean GraalVM for the Windows LLVM backend dev loop (graalvm-dev.yml):
+# GraalVM compiler + SubstrateVM + the native-image driver + the Native Image LLVM
+# backend tool + the LLVM.org toolchain. No Sulong, no libgraal, no agents, no extra
+# macros; only the native-image launcher is built as a native executable.
+#
+# `svml` (Native Image LLVM Backend) is registered only where mx_substratevm.py's
+# `llvm_supported` holds (not Windows, not darwin-aarch64, GR-34811). An unknown short
+# name in COMPONENTS is a warning, not an error ("The component inclusion list
+# ('--components' or '$COMPONENTS') includes an unknown component" in
+# sdk/mx.sdk/mx_sdk_vm_impl.py), so the same env file serves every platform: a graal ref
+# that does not register the backend simply builds without it.
+# Component dependencies are expanded transitively, so this list pulls in sdkc,
+# SubstrateVM Static Libraries and Truffle Runtime SVM (svmt) by itself.
+DYNAMIC_IMPORTS=/sdk,/truffle,/compiler,/substratevm
+COMPONENTS=cmp,svm,ni,nil,sdkni,svml,llp
+NATIVE_IMAGES=native-image
+NON_REBUILDABLE_IMAGES=

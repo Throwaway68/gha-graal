@@ -29,3 +29,5 @@ tests/test_coff_assoc_comdats.py
 scripts/jars/shadow.py
 tests/test_shadow.py
 .github/workflows/jars.yml
+mx-env/ce-llvm-dev
+.github/workflows/graalvm-dev.yml
