@@ -17,6 +17,14 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   archive as `unwind.lib`, and `include/unwind.h`, and nothing loose at its root. This is the release
   tasks 5 to 9 consume.
 
+- 2026-09-17: Shadowed jars release `jars-1.5.7-graal.1`
+  (run https://github.com/Throwaway68/gha-graal/actions/runs/35215356056, green first try):
+  `javacpp-shadowed-1.5.7-graal.1-windows-x86_64.jar`,
+  `llvm-shadowed-13.0.1-1.5.7-graal.1-windows-x86_64.jar` and `manifest.json`, built by
+  `.github/workflows/jars.yml` from the Maven Central windows-x86_64 platform jars with
+  `scripts/jars/shadow.py`. Task 6 points suite.py's windows-amd64
+  `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` / `LLVM_PLATFORM_SPECIFIC_SHADOWED` at them.
+
 ## Findings
 
 - 2026-09-17 (research, no run): On x86_64 COFF, LLVM emits the Itanium LSDA into `.xdata` right after the
@@ -107,6 +115,28 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   directory (still printed to the log, still uploaded by the spike workflow) and, as a regression guard,
   snapshots the regular files at the out dir's root before installing and fails if it added any. The
   republished bundle has 4080 entries and not one of them lives directly at the root.
+
+- 2026-09-17 (run https://github.com/Throwaway68/gha-graal/actions/runs/35215356056): **the windows-x86_64
+  shadowed jars, for Task 6 to paste into suite.py verbatim** (sizes 1338481 and 620008997 bytes; digests
+  re-verified after downloading the published assets):
+  - https://github.com/Throwaway68/gha-graal/releases/download/jars-1.5.7-graal.1/javacpp-shadowed-1.5.7-graal.1-windows-x86_64.jar
+    `sha512:bc5e04f8b80cea785b0b6b9c0824030e5aeed99d5ed5b8610d9a9b895eb0a957f16c0660d87db6193892d3b2882ee74b1d7ad32d963007ba0a313d01ba94ce61`
+    module `com.oracle.svm.shadowed.org.bytedeco.javacpp.windows.x86_64`
+  - https://github.com/Throwaway68/gha-graal/releases/download/jars-1.5.7-graal.1/llvm-shadowed-13.0.1-1.5.7-graal.1-windows-x86_64.jar
+    `sha512:64d5fead2d66e81c4c5ef3710e86bc2b16e8d2f8bddc7a63ebaa25ddad897d94c5839d0f99d5d038095b08878062a889f2459874e14ad90cdca66eaa7a3cd0d3`
+    module `com.oracle.svm.shadowed.org.bytedeco.llvm.windows.x86_64`
+  - `manifest.json`: https://github.com/Throwaway68/gha-graal/releases/download/jars-1.5.7-graal.1/manifest.json
+- 2026-09-17 (research, `javap` on Oracle's linux-x86_64 and macosx-arm64 shadowed jars): **the shadowed
+  platform jars are a pure repackaging.** They hold only native binaries (no `.class` files except the
+  descriptor), so relocating `org/bytedeco/**` to `com/oracle/svm/shadowed/org/bytedeco/**` is entry
+  renaming only - there is no bytecode to rewrite. `META-INF/versions/9/module-info.class` of every one of
+  them is `open module com.oracle.svm.shadowed.org.bytedeco.<llvm|javacpp>.<os>.<arch> { requires transitive
+  com.oracle.svm.shadowed.org.bytedeco.<llvm|javacpp>; requires java.base; }`, the manifest says
+  `Multi-Release: true`, and there is no root descriptor, so `jar --describe-module` needs `--release 9`
+  (without it: "No root module descriptor, specify --release", exit code 0). The base modules to compile
+  against come from `https://lafo.ssw.uni-linz.ac.at/pub/graal-external-deps/native-image/` as
+  `llvm-shadowed-13.0.1-1.5.7.jar` and `javacpp-shadowed-1.5.7.jar` (the `_1` names are 404); the llvm
+  descriptor needs both on javac's module path, since the llvm module requires javacpp.
 
 ## Decisions
 
