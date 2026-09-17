@@ -3,9 +3,8 @@ name: GraalVM dev
 # Fast iteration loop for the Windows LLVM backend: build a lean GraalVM (compiler,
 # SubstrateVM, native-image driver, LLVM backend tool, LLVM.org toolchain) from a graal
 # ref, build one program under tests/programs with `--tool:llvm-backend`, upload the
-# native-image work directory. mx's downloads are cached per platform and the build itself
-# per platform + JDK + graal SHA, so re-running the same graal commit (another program,
-# other ni_args, after a failure) reuses the GraalVM built by the previous run.
+# native-image work directory. Every run builds the GraalVM from scratch; only mx's downloads
+# are cached.
 
 on:
   workflow_dispatch:
@@ -61,6 +60,8 @@ jobs:
           fetch-depth: 1
       - name: Derive paths
         shell: bash
+        # JDK_ID and GRAAL_SHA are not used by any later step; they are here so that every step's
+        # environment dump in the log says exactly which JDK and which graal commit was built.
         run: |
           echo "MX_PATH=$GITHUB_WORKSPACE/mx" >> "$GITHUB_ENV"
           echo "JAVA_HOME=$GITHUB_WORKSPACE/jdk" >> "$GITHUB_ENV"
@@ -89,44 +90,35 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
           arch: x64
-      # Two caches, both restored/saved explicitly instead of with actions/cache@v4: that
-      # action's post step is `post-if: success()`, so a job that fails at dev-run (the
-      # expected Windows outcome until the backend works) would never save its build.
+      # One cache: mx's downloads (~1.2 GB; LLVM_ORG alone is a 40 s download). What they are
+      # is decided by the LLVM release the URL rewrites point at and by the suite files that name
+      # the dependencies, so that is the key - not the graal commit.
       #
-      # 1. mx's download cache: the graal dependencies (~1 GB, LLVM_ORG alone is 40 s) do not
-      #    depend on the graal commit, so this one falls back by platform and helps every run.
-      #    Without it mx re-downloads them, and because a fresh download is newer than every
-      #    build output, "dependency ANTLR4 updated" / "dependency LLVM_ORG updated" rebuild
-      #    the shaded jars, the Truffle processors, the LLVM toolchain and the GraalVM layout
-      #    even from a fully populated mxbuild (run 35219010453).
+      # There is deliberately no cache of the build outputs (controller ruling, 2026-09-17): tasks
+      # 6 to 8 push a new graal commit per iteration, where a `graal/*/mxbuild` cache reuses
+      # nothing - mx rebuilds from file timestamps, and a checkout stamps every source with the
+      # time of the run - while still costing ~3.5 min to save on Windows. Keeping it useful meant
+      # rewriting the timestamps of the restored tree, and its key did not name `llvm_release`, so
+      # the same graal commit rebuilt against a new LLVM release would have silently kept the old
+      # toolchain. A cold lean build is ~7.5 min on windows-amd64, ~5.5 min on linux-amd64.
+      #
+      # restore/save rather than actions/cache@v4: that action's post step is `post-if: success()`,
+      # so a job that fails at dev-run - the expected Windows outcome until the backend works -
+      # would never save anything.
+      #
+      # jdk-dl is not cached either: mx deletes and re-downloads the LabsJDK on every run
+      # ("Deleting stale ...jdk-dl\labsjdk-ce-latest-..." in run 35219010453), which takes 9 to
+      # 20 s, so caching it only adds save time.
       - name: Restore mx download cache
         id: mxdl
         uses: actions/cache/restore@v4
         with:
           path: ~/.mx/cache
-          key: dev-mxdl-${{ inputs.platform }}-${{ env.JDK_ID }}-${{ env.GRAAL_SHA }}
+          key: dev-mxdl-${{ inputs.platform }}-${{ inputs.llvm_release }}-${{ hashFiles('graal/common.json', 'graal/*/mx.*/suite.py') }}
+          # A suite.py edit - task 6 does exactly that - must not mean downloading everything
+          # again; mx checks each artifact's digest, so an older set is safe to start from.
           restore-keys: |
-            dev-mxdl-${{ inputs.platform }}-${{ env.JDK_ID }}-
-            dev-mxdl-${{ inputs.platform }}-
-      # 2. the build itself. No restore-keys: mx decides what to rebuild from file timestamps
-      #    and a checkout stamps every source with the time of the run, so a cache from a
-      #    *different* graal commit is rebuilt from scratch anyway - measured on windows-amd64
-      #    (runs 35216649197 cold vs 35217642476 from a fallback hit): restoring 5 GB costs
-      #    ~2 min and saved nothing. Only an exact hit - the same graal commit run again with
-      #    another program, other ni_args or after a failure - is worth restoring.
-      - name: Restore build cache
-        id: cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            graal/*/mxbuild
-            mx/mxbuild
-          key: dev-mxbuild-${{ inputs.platform }}-${{ env.JDK_ID }}-${{ env.GRAAL_SHA }}
-      - name: Cache state
-        shell: bash
-        run: |
-          echo "mx downloads: ${{ steps.mxdl.outputs.cache-matched-key }} (exact: ${{ steps.mxdl.outputs.cache-hit }})"
-          echo "build:        ${{ steps.cache.outputs.cache-matched-key }} (exact: ${{ steps.cache.outputs.cache-hit }})"
+            dev-mxdl-${{ inputs.platform }}-${{ inputs.llvm_release }}-
       - name: Fetch LabsJDK
         shell: bash
         # Run inside the graal checkout so mx resolves labsjdk-ce-latest from graal/common.json.
@@ -147,122 +139,6 @@ jobs:
       - name: Install env file
         shell: bash
         run: cp ci/mx-env/ce-llvm-dev graal/vm/mx.vm/ce-llvm-dev
-      - name: Age the build inputs
-        shell: bash
-        run: |
-          python3 - <<'EOF'
-          # mx rebuilds a target when an input is newer than its output, and every input outside
-          # mxbuild arrives fresh in a hosted run: actions/checkout stamps the graal and mx trees
-          # with the time of this run and mx re-downloads the LabsJDK ("Deleting stale
-          # ...jdk-dl..."). A restored mxbuild is then rebuilt from scratch - directly
-          # ("HostProxyException.class[11:38:28] is older than HostProxyException.java[11:49:01]",
-          # run 35217642476), through *directory* mtimes, which ninja and archive tasks compare
-          # too ("llvm-toolchain.tar[12:22:14] is older than graal\sdk\llvm-patches\backports" and
-          # "ninja explain: output build.ninja older than most recent input .../include", run
-          # 35221772232), and through the LabsJDK's lib/modules timestamp, which mx stores in the
-          # graalvm-jimage config ("the configuration changed").
-          #
-          # Giving all of them one fixed old timestamp fixes that, and unconditionally: without a
-          # restore-keys fallback the build cache is either an exact hit - then this checkout, mx
-          # and JDK are the ones that produced it, so the restored outputs really are up to date -
-          # or empty, and then nothing can be wrongly skipped. Doing it on cold runs too is what
-          # makes the recorded jimage config match on the next run.
-          import os
-          stamp = 946684800  # 2000-01-01T00:00:00Z, older than any build output
-          files, dirs = [], []
-          for root in ('graal', 'mx', 'jdk-dl', 'jdk'):
-              if not os.path.isdir(root):
-                  continue
-              dirs.append(root)
-              for dirpath, dirnames, filenames in os.walk(root):
-                  dirnames[:] = [d for d in dirnames if d not in ('.git', 'mxbuild')]
-                  dirs += [os.path.join(dirpath, d) for d in dirnames]
-                  files += [os.path.join(dirpath, f) for f in filenames]
-          def touch(p):
-              try:
-                  os.utime(p, (stamp, stamp))
-                  return True
-              except OSError:
-                  return False
-          def stale(p):
-              try:
-                  return int(os.stat(p).st_mtime) != stamp
-              except OSError:
-                  return False
-          n = sum(touch(p) for p in files)
-          # Directories after the files and deepest first, then re-stamped while they still look
-          # new. This is best effort on NTFS and cannot be made reliable there: the file
-          # timestamps are duplicated into the parent's index entry and flushed asynchronously,
-          # so a directory that verifies as old here comes back with the current time a second
-          # later (run 35223782654: verified at 13:21:16.8, read by ninja as 13:21:18.4). The
-          # "Freshen the restored build outputs" step below is what actually wins that race.
-          dirs.reverse()
-          left, passes = dirs, 0
-          while left and passes < 5:
-              passes += 1
-              for d in left:
-                  touch(d)
-              left = [d for d in left if stale(d)]
-          print(f'backdated {n}/{len(files)} files and {len(dirs) - len(left)}/{len(dirs)} '
-                f'directories to 2000-01-01 in {passes} pass(es)')
-          if left:
-              print(f'WARNING: {len(left)} directories kept a newer mtime, e.g. {left[:3]}')
-          EOF
-      - name: Freshen the restored build outputs
-        if: steps.cache.outputs.cache-hit == 'true'
-        shell: bash
-        run: |
-          python3 - <<'EOF'
-          # NTFS duplicates a file's timestamps into its parent's directory index entry and
-          # flushes that asynchronously, so backdating a source tree bumps its directories back
-          # to the current time a moment later - after the step that backdated them has already
-          # verified they were old (run 35226210569: the step finished at 13:21:16.8 and ninja
-          # then read graal/truffle/src/com.oracle.truffle.attach/include as 13:21:18.4, which
-          # regenerated every native project and, through TRUFFLE_API, half the build).
-          # Nothing can be done about that from the source side, so put the restored outputs an
-          # hour into the future instead: no bump landing during this run can beat them. Only on
-          # an exact cache hit, where the restored outputs are the ones this very commit, mx and
-          # JDK produced. mx and ninja both compare strictly (isOlderThan: arg.timestamp >
-          # self.timestamp), so one shared timestamp for all outputs means none of them is stale.
-          import os, time
-          stamp = time.time() + 3600
-          t0 = time.time()
-          roots = [os.path.join('graal', d, 'mxbuild') for d in os.listdir('graal')]
-          roots = [r for r in roots if os.path.isdir(r)] + [r for r in ['mx/mxbuild'] if os.path.isdir(r)]
-          generated_src = ('gensrc', 'jni_gen')
-          def touch(p):
-              try:
-                  os.utime(p, (stamp, stamp))
-                  return 1
-              except OSError:
-                  return 0
-          n, ninja = 0, 0
-          for root in roots:
-              for dirpath, dirnames, filenames in os.walk(root):
-                  # A ninja build directory is left alone except for build.ninja: ninja's deps log
-                  # remembers the mtime each object had when its header dependencies were
-                  # recorded, and an object that is suddenly newer means "stored deps info out of
-                  # date for 'src/launcher.obj'" and a rebuild (run 35227444918). build.ninja
-                  # itself has to move, so that it outranks the source directories that NTFS
-                  # bumps to the current time.
-                  if 'build.ninja' in filenames:
-                      dirnames[:] = []
-                      ninja += touch(os.path.join(dirpath, 'build.ninja'))
-                      continue
-                  # The native sources mx generates into mxbuild (gensrc/JvmFuncsFallbacks.c,
-                  # jni_gen/*.h) are ninja inputs whose objects keep their old mtimes above, so
-                  # they have to stay behind as well ("ninja explain: output
-                  # .../JvmFuncsFallbacks.obj older than most recent input .../JvmFuncsFallbacks.c",
-                  # run 35228721057). Only those directories: headers elsewhere in mxbuild are
-                  # ordinary outputs that mx does compare (skipping them made com.oracle.svm.core
-                  # recompile over its own bin/.../sharedGCStructs.h in run 35229643502).
-                  dirnames[:] = [d for d in dirnames if d not in generated_src]
-                  for name in dirnames + filenames:
-                      n += touch(os.path.join(dirpath, name))
-              n += touch(root)
-          print(f'stamped {n} restored build outputs (and {ninja} build.ninja, keeping their '
-                f'objects) in {", ".join(roots)} one hour ahead in {time.time() - t0:.0f}s')
-          EOF
       - name: Build (Linux/macOS)
         id: build_unix
         if: runner.os != 'Windows'
@@ -284,19 +160,11 @@ jobs:
           set /p GRAALVM_HOME=<graalvm-home.txt
           echo GRAALVM_HOME=%GRAALVM_HOME%>>%GITHUB_ENV%
       - name: Save mx download cache
-        if: always() && steps.mxdl.outputs.cache-hit != 'true' && (steps.build_unix.outcome == 'success' || steps.build_win.outcome == 'success')
+        if: steps.mxdl.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.mx/cache
           key: ${{ steps.mxdl.outputs.cache-primary-key }}
-      - name: Save build cache
-        if: always() && steps.cache.outputs.cache-hit != 'true' && (steps.build_unix.outcome == 'success' || steps.build_win.outcome == 'success')
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            graal/*/mxbuild
-            mx/mxbuild
-          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: dev-run
         shell: bash
         run: bash ci/scripts/graalvm/dev-run.sh "$GRAALVM_HOME" "ci/tests/programs/${{ inputs.program }}" "$GITHUB_WORKSPACE/work" ${{ inputs.ni_args }}
