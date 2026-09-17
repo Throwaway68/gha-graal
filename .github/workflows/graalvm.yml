@@ -90,9 +90,13 @@ jobs:
           arch: x64
       - name: Fetch LabsJDK
         shell: bash
+        # Run inside the graal checkout so mx resolves labsjdk-ce-latest from graal/common.json
+        # (outside it, mx falls back to its own bundled, older JDK definitions).
         run: |
-          mkdir -p jdk-dl
-          "$MX_PATH/mx" --java-home= fetch-jdk --jdk-id labsjdk-ce-latest --to jdk-dl --alias "$JAVA_HOME"
+          mkdir -p "$GITHUB_WORKSPACE/jdk-dl"
+          cd graal
+          "$MX_PATH/mx" --java-home= fetch-jdk --jdk-id labsjdk-ce-latest --to "$GITHUB_WORKSPACE/jdk-dl" --alias "$JAVA_HOME"
+          ls "$GITHUB_WORKSPACE/jdk-dl"
           if [ -d "$JAVA_HOME/Contents/Home" ]; then echo "JAVA_HOME=$JAVA_HOME/Contents/Home" >> "$GITHUB_ENV"; fi
       - name: Point graal at our LLVM release (MX_URLREWRITES)
         shell: bash
