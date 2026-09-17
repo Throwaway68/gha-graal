@@ -71,6 +71,28 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `DEV-RUN OK` on the same commit
   (https://github.com/Throwaway68/gha-graal/actions/runs/35242758887, 7m43s).
 
+- 2026-09-17: **Windows produces a single COFF object and reaches the final link** (graal commits
+  6b409222e7c, e7ed89f0bb9 and 2c64a5498c2 on `graal/25.3.4.1-win-llvm`, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35248532685). All 5,249 methods of the
+  `hello` program go into one LLVM batch, `llc` turns it into `b0.o`, which is copied to `llvm.obj`
+  (there is no `ld -r` on PE/COFF); `parseCode` finds `.text$svm1` and every method offset in it,
+  `llvm-objcopy` strips the 4.8 MB stack map section, the image object is written and `cl.exe` runs
+  the real link. It fails exactly where task 8 picks up:
+
+  ```
+  app.obj : error LNK2001: unresolved external symbol _Unwind_RaiseException
+  llvm.obj : error LNK2001: unresolved external symbol _Unwind_RaiseException
+  D:\a\gha-graal\gha-graal\work\app.exe : fatal error LNK1120: 5 unresolved externals
+  ```
+
+  (the five are `_Unwind_RaiseException`, `_Unwind_GetIPInfo`, `_Unwind_GetLanguageSpecificData`,
+  `_Unwind_GetRegionStart`, `_Unwind_SetIP`; there is no unresolved `__svm_seh_personality`,
+  because the personality is the Java method `LLVMExceptionUnwind.personality` and its
+  `IsolateEnterStub` is compiled into `llvm.obj` like any other method). linux-amd64 is `DEV-RUN OK`
+  on the same branch head (https://github.com/Throwaway68/gha-graal/actions/runs/35248894118) and
+  on the first of the three commits
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35245906387).
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -422,6 +444,82 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   whether or not it failed, with `limit-access-to-actor: true` - this repository is public and the
   connection string lands in the log, so the dispatching account needs a public key at
   https://github.com/settings/keys for the session to be usable.
+
+- 2026-09-17 (run https://github.com/Throwaway68/gha-graal/actions/runs/35248532685): **what the
+  single Windows object looks like.** `llvm.obj` of the `hello` program, 5.0 MB, COFF-x86-64, 53
+  sections, read from the artifact with `llvm-readobj`/`llvm-nm` 22.1.8:
+
+  | section | raw size | relocs | holds |
+  |---------|---------:|-------:|-------|
+  | `.text` | 1,516 | 0 | the 22 `__llvm_jni_wrapper_*` transition wrappers |
+  | `.text$svm0` | 0 | 0 | `__svm_code_section` |
+  | `.text$svm1` | 2,517,614 | 55,623 | 5,249 Java methods, 5,451 symbols |
+  | `.text$svm2` | 0 | 0 | `__svm_text_end` |
+  | `.pdata` (2) | 62,988 + 252 | 15,747 + 63 | one 12-byte RUNTIME_FUNCTION per Java method |
+  | `.xdata` (2) | 170,124 + 272 | 5,249 + 0 | SEH unwind info, one personality reloc per method |
+  | `.rdata` (43) | 19,588 + small | 4,897 | jump tables and constants |
+
+  `llvm-nm` shows `__svm_code_section` and `__svm_text_end` as `T` at offset 0 of their marker
+  sections. There is exactly one `.text$svm1`, which is what makes the exact-name lookup in
+  `parseCode` work. `b0.o`, the same object before `llvm-objcopy`, additionally carries
+  `.llvm_stackmaps` at 5,040,488 bytes - half the file - so stripping it is not cosmetic.
+
+  Two differences from linux to keep in mind. The `__llvm_jni_wrapper_*` functions come from
+  `LLVMGenerator.createJNIWrapper`, not from `addMainFunction`, so they keep the default section and
+  end up *outside* `[__svm_code_section, __svm_text_end)`, where on linux everything shares `.text`.
+  They should never be the target of a code-info lookup - the wrapper stores its *caller's* return
+  address into the JavaFrameAnchor, which is the whole point of it - but it is a difference. The
+  `LinkOnce` helpers of `LLVMHelperFunctions`, which do get the code section, turn into COFF weak
+  externals inside `.text$svm1` rather than into separate COMDAT sections, so they cannot confuse
+  the section lookup either.
+
+- 2026-09-17 (local experiment with the darwin bundle of `llvm-22.1.8-graal.2`): **grouped sections
+  put plain `.text` first, and the end marker is padded.** Two objects - one with
+  `.text$svm0`/`.text$svm1`/`.text$svm2` exactly as the backend now emits them, one with an ordinary
+  `.text` function - linked with `lld-link /dll /noentry` give a single `.text` of 0x40 bytes: the
+  plain `.text` function at +0x00, then `.text$svm0` (empty) and the three `.text$svm1` functions at
+  +0x10, then `.text$svm2` at +0x40. A contribution without a `$` suffix sorts before every
+  `.text$*` one, which is why the JNI wrappers cannot land between the two markers, and MSVC's own
+  code is in `.text$mn` ("mn" < "svm0"), so it cannot either. The end marker is aligned up by its
+  `.p2align 4`: for the real object `__svm_text_end - __svm_code_section` will be 2 bytes more than
+  the 2,517,614 `parseCode` reports as the code area size (2517614 % 16 == 14). Whatever consumes
+  the two symbols at runtime has to tolerate that.
+
+- 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35245894558 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35247213695): **two things the single-batch
+  design breaks that have nothing to do with sections.** First, one batch means one bitcode file per
+  method on the `llvm-link` command line - 5,249 of them, about 47 kB - and Windows caps a command
+  line at 32,767 characters:
+
+  ```
+  Cannot run program "...\lib\llvm\bin\llvm-link" (in directory "...\llvm"):
+  CreateProcess error=206, The filename or extension is too long
+  ```
+
+  LLVM tools expand `@`-response files in `InitLLVM`, before command line parsing, so the inputs now
+  go into `b0.bc.rsp`, one per line (verified against llvm-link 22.1.8 locally before pushing).
+  Second, `WindowsUnwindInfoFeature` derives `.pdata`/`.xdata` from the prologue code marks of every
+  compilation, and the LLVM backend records none, so the first run that reached `[8/8] Creating
+  image` died in it with `Cannot read field "id" because "prologueMarks[i]" is null`. The feature has
+  nothing to do under this backend either - `llvm.obj` brings its own `.pdata`/`.xdata` - so it now
+  stays out of the configuration when `SubstrateOptions.useLLVMBackend()` holds.
+
+  Both were found only because the error message now carries the tool's own output: `nativeLink` and
+  friends used to log it to `debug.log`, which needs `-H:Log` to reach the console. The one helper
+  that appends `e.getOutput()` to all seven `GraalError` messages of `LLVMToolchainUtils` is the
+  cheapest change in this task and paid for itself twice.
+
+- 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35242773448,
+  .../35248532685 and .../35248894118): **the single batch costs about 20 s of wall clock on
+  `hello`.** `[7/8] Laying out methods` - the phase that runs the `(bitcode)`, `(prelink)`, `(llvm)`
+  and `(postlink)` timers - takes 40.3 s on windows-amd64 with one batch, against 20.1 s on the same
+  runner class with the default six batches (task 6's run, which then failed in `lld-link`), and
+  16.0 s on linux-amd64 with six batches. `opt` and `llc` are the bulk of it and they are now a
+  single process on one core; the batch executor has nothing left to parallelize. For `hello` this is
+  noise next to the 7-minute GraalVM build, but it scales with the program, and a real image will
+  feel it. If it ever matters, the way out is not more batches - PE/COFF still cannot link them - but
+  `llc -j`-style parallelism inside one module, or splitting into several objects that all use
+  `.text$svm1` and letting the image linker concatenate them.
 
 ## Decisions
 
