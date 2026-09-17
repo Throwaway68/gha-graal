@@ -8,7 +8,10 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 H=${1:?graalvm home}; P=${2:?program dir}; W=${3:?work dir}; shift 3
-P=$(cd "$P" && pwd); mkdir -p "$W"; W=$(cd "$W" && pwd)
+# Absolute, toolchain-native paths: `pwd -W` gives the Windows form (D:/a/_temp/work) in Git Bash,
+# which bash, javac.exe, native-image.cmd and cmd.exe all accept; elsewhere it fails and we use pwd.
+abspath() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); }
+P=$(abspath "$P"); mkdir -p "$W"; W=$(abspath "$W")
 
 exe() { local d=$1 n=$2 c; for c in "$n" "$n.exe" "$n.cmd"; do [ -e "$d/$c" ] && { echo "$d/$c"; return 0; }; done; echo "missing $n in $d" >&2; ls "$d" >&2; return 1; }
 JAVAC=$(exe "$H/bin" javac); NI=$(exe "$H/bin" native-image)
