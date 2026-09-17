@@ -38,15 +38,16 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `dev-<platform>-<program>` artifact carries `work/stdout.txt`, `work/stderr.txt`, the
   native-image reports and the LLVM objects of the run.
 
-- 2026-09-17: **Windows enters the LLVM pipeline** (graal commit 9aad563fd45 on
+- 2026-09-17: **Windows enters the LLVM pipeline** (graal commits 9aad563fd45 and 6962b05ef22 on
   `graal/25.3.4.1-win-llvm`, run https://github.com/Throwaway68/gha-graal/actions/runs/35236412885).
   `svml` is registered on windows-amd64, `mx build` succeeds against the windows-x86_64 shadowed
   jars, the module gate passes, and `native-image --tool:llvm-backend` gets through analysis and
   into `SubstrateLLVMBackend.emitLLVM` -> `LLVMGenerator.<init>` -> `LLVMIRBuilder.<init>` in
   [6/8] Compiling methods. It does not get out of that constructor yet - see the finding below on
-  the shadowed native libraries. The same commit is neutral on linux-amd64: `DEV-RUN OK`
-  (https://github.com/Throwaway68/gha-graal/actions/runs/35236400414, 7m44s), so the header-free
-  unwind declarations are a no-op where the header exists.
+  the shadowed native libraries. The branch is neutral on linux-amd64: `DEV-RUN OK` both at
+  9aad563fd45 (https://github.com/Throwaway68/gha-graal/actions/runs/35236400414, 7m44s) and at the
+  branch head (https://github.com/Throwaway68/gha-graal/actions/runs/35239817876), so the
+  header-free unwind declarations are a no-op where the header exists.
 
 ## Findings
 
@@ -314,6 +315,35 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   branch, point all platforms at the stock `org.bytedeco` jars from Maven Central and rename the
   package in the 11 graal files that mention it plus suite.py and `SVM_LLVM`'s `moduleInfo` -
   cheap and mechanical, but it diverges from upstream everywhere.
+
+- 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35238742378 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35239767153, graal commit 6962b05ef22):
+  **the reason GR-34811 also excludes darwin-aarch64 is a two-line manifest, not a missing port.**
+  Registering `svml` there with the `moduleName` entries the plan expected makes `mx build` fail at
+
+  ```
+  java --describe-module com.oracle.svm.shadowed.org.bytedeco.llvm.macosx.arm64 failed. Please verify the moduleName attribute of LLVM_PLATFORM_SPECIFIC_SHADOWED.
+  stdout:
+  com.oracle.svm.shadowed.org.bytedeco.llvm.macosx.arm64 not found
+  ```
+
+  The module is there - `META-INF/versions/9/module-info.class` of
+  `llvm-shadowed-13.0.1-1.5.7-macosx-arm64.jar` names
+  `com.oracle.svm.shadowed.org.bytedeco.llvm.macosx.arm64` - but the whole manifest of that jar and
+  of `javacpp-shadowed-1.5.7-macosx-arm64.jar` is `Manifest-Version: 1.0` plus
+  `Created-By: 20.0.1 (Oracle Corporation)`, with no `Multi-Release: true`, so nothing under
+  `META-INF/versions/` is ever consulted. The linux jars have the attribute (their manifest is
+  2255 bytes of OSGi metadata from the original bytedeco build; the darwin-aarch64 ones were
+  clearly repackaged with plain `jar`, losing it). Their natives are fine - `nm` on
+  `libjnijavacpp.dylib` shows 108 `Java_com_oracle_svm_shadowed_org_bytedeco_javacpp_*` exports and
+  the shadowed `FindClass` strings, i.e. these were built the way the windows ones would have to
+  be. So darwin-aarch64 is one re-manifested pair of jars away from a working LLVM backend, which
+  is a jar to publish rather than a source change; this branch therefore keeps
+  `llvm_supported = not (mx.is_darwin() and mx.get_arch() == "aarch64")` and leaves the two
+  darwin/aarch64 suite.py entries byte-identical to upstream. With that, darwin-aarch64 is back to
+  the pristine tag's behaviour: the GraalVM builds and `dev-run` stops at
+  `Error: Unknown name in option specification: tool:llvm-backend` (exit 20), the same way the tag
+  behaves on Windows.
 
 - 2026-09-17 (the user's tip): GitHub Actions runners can be reached over **ssh for interactive
   debugging** (a tmate/upterm-style step), which beats a full workflow round trip per attempt when
