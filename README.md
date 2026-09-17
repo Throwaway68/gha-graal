@@ -9,6 +9,7 @@ linux-amd64, windows-amd64 and darwin-aarch64. Design: `docs/superpowers/specs/2
 | Repo | Branch | What |
 |------|--------|------|
 | `Throwaway68/llvm-project` | `graal/22.1.8` | llvmorg-22.1.8 + the four patches from graal's `sdk/llvm-patches` |
+| `Throwaway68/llvm-project` | `graal/22.1.8-win` | the above + `CallingConv::GRAAL` is Win64 on Windows (see below) |
 | `Throwaway68/graal` | `graal/25.3.4.1-ci` | graal-25.3.4.1 + LLVM backend registered on darwin-aarch64 |
 
 ## Workflows
@@ -20,6 +21,11 @@ Publishes release `llvm-<version>` with `llvm-<version>-<platform>.tar.gz`,
 The windows-amd64 bundle also carries libunwind built in SEH mode for
 `x86_64-w64-windows-gnu` (`lib/x86_64-w64-windows-gnu/libunwind.a`, the same archive as
 `unwind.lib`, and `include/unwind.h`), which the Native Image LLVM backend links into images.
+Release `llvm-22.1.8-graal.3` is the same toolchain built from `graal/22.1.8-win`, whose one extra
+commit makes `X86Subtarget::isCallingConvWin64` answer true for `CallingConv::GRAAL`: without it a
+GraalVM-convention function on Win64 gets the Win64 argument registers but no 32-byte home space, so
+C callers and every entry point with more than four arguments disagree about the fifth one. Nothing
+changes off Windows. The Windows LLVM backend needs that release.
 
 **GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-ci -f llvm_release=llvm-22.1.8-graal.1`.
 Builds any graal ref against the LLVM release: graal's downloads from
@@ -28,7 +34,7 @@ Builds any graal ref against the LLVM release: graal's downloads from
 `graalvm-<label>` with a `.tar.gz` per Unix platform, a `.zip` for Windows,
 and `manifest.json`.
 
-**GraalVM dev** (`graalvm-dev.yml`): `gh workflow run graalvm-dev.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.2 -f platform=windows-amd64 -f program=hello`.
+**GraalVM dev** (`graalvm-dev.yml`): `gh workflow run graalvm-dev.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f platform=windows-amd64 -f program=hello`.
 The iteration loop for the Windows backend port: one platform, no release. Builds the lean
 `mx-env/ce-llvm-dev` GraalVM (compiler, SubstrateVM, native-image driver, LLVM backend tool,
 LLVM.org toolchain; only `native-image` is built as a native launcher), then builds

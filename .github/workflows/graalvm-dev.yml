@@ -16,7 +16,7 @@ on:
         type: string
       llvm_release:
         description: 'LLVM release tag in this repo'
-        default: 'llvm-22.1.8-graal.2'
+        default: 'llvm-22.1.8-graal.3'
         required: true
         type: string
       platform:
@@ -185,7 +185,7 @@ jobs:
       # `auto`, which would leave the runner open to anyone reading the log).
       - name: Debug over ssh (tmate)
         if: ${{ !cancelled() && inputs.debug_ssh }}
-        timeout-minutes: 45
+        timeout-minutes: 180
         uses: mxschmitt/action-tmate@v3.24
         with:
           limit-access-to-actor: true

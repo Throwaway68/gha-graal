@@ -521,6 +521,70 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `llc -j`-style parallelism inside one module, or splitting into several objects that all use
   `.text$svm1` and letting the image linker concatenate them.
 
+- 2026-09-17 (graal commit 999fc4f25e7, run https://github.com/Throwaway68/gha-graal/actions/runs/35252597474):
+  **the Windows image links and runs; the SEH shim and libunwind are in place.** `cl.exe` accepts
+  `unwind.lib` (a copy of `lib/x86_64-w64-windows-gnu/libunwind.a` in the image temp directory) as an
+  input file plus `kernel32.lib`, `ntdll.lib` and `legacy_stdio_definitions.lib` through
+  `addNativeLinkerOption`, and the five `_Unwind_*` symbols resolve. `app.exe` starts, initializes the
+  isolate, runs `JavaMainWrapper` and reaches `Hello.main` and `System.out.println` - the whole startup
+  path of a Native Image runs LLVM-compiled code with the grouped-section layout of task 7.
+
+- 2026-09-17 (same run, evidence read back from the artifact's `llvm.obj` with `objdump`):
+  **the marker/offset layout is exactly as designed, and no offset fix-up is needed.**
+  `.text$svm0` and `.text$svm2` are both 0 bytes and hold `__svm_code_section` and `__svm_text_end` at
+  offset 0. `.text$svm1` is 0x266a6e bytes and its first symbol at offset 0 is a real Java method
+  (`InvalidMethodPointerHandler_invalidCodeAddressHandler_...`), which is what makes the image's
+  `codeStart` correct: it is a `MethodPointer` to the first compilation, and every method's
+  `codeAddressOffset` is relative to the start of that section. The SEH glue sits in its own
+  `.text$svm3` (0x3b bytes). Nothing at run time reads `__svm_code_section` or `__svm_text_end` - they
+  exist only because `NativeImage.build` declares them undefined when the code cache does not define
+  them - so the 16-byte alignment of `.text$svm2` (`.p2align 4`), which can leave `__svm_text_end` up to
+  15 bytes past the last function, is harmless and stays.
+
+- 2026-09-17 (same run, `objdump -h`): **plain `.text` is not empty: it holds the 22
+  `__llvm_jni_wrapper_*` transition wrappers** (0x5ec bytes), because `LLVMGenerator.createJNIWrapper`
+  does not set a section while `LLVMHelperFunctions` does. They therefore live outside
+  `[__svm_code_section, __svm_text_end)`. That is harmless: the wrapper stores its *caller's* return
+  address in the `JavaFrameAnchor` (`buildReturnAddress(0)`), so no stack walk ever resolves a wrapper
+  PC - confirmed in the crash dumps below, where `LastJavaIP` resolves to `FileOutputStream.writeBytes`.
+  Left alone on purpose, see the decisions.
+
+- 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35252597474 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35253878368): **the Graal calling convention is
+  broken on Win64, and it is an LLVM bug.** `System.out.println` ends in `FileOutputStream.writeBytes`
+  in `libjava.dll`, which calls back through the JNI function table; the image died in
+  `GetByteArrayRegion(env, array, start, len, buf)` with an access violation inside the copy. The entry
+  point stub reads its fifth argument from the wrong slot:
+
+  ```
+  IsolateEnterStub__JNIFunctions__GetByteArrayRegion__...:
+      push rbp; push r15; push r14; push r13; push r12; push rsi; push rdi; push rbx
+      sub  rsp, 0x18
+      lea  rbp, [rsp+0x10]        ; rbp = entry rsp - 72
+      ...
+      mov  rsi, [rbp+0x50]        ; = entry rsp + 8
+  ```
+
+  Win64 puts the fifth argument at *return address + 40*: the caller reserves 32 bytes of home space.
+  `X86Subtarget::isCallingConvWin64` lists the conventions that get it and ends in `default: return
+  false`, and `CallingConv::GRAAL` (107, "Used by GraalVM. Two additional registers are reserved.")
+  falls into that default. So the Graal convention on Win64 is "Win64 argument registers, no home
+  space", and every entry point that C calls with more than four arguments is broken - which is most of
+  the JNI function table.
+
+- 2026-09-17 (run https://github.com/Throwaway68/gha-graal/actions/runs/35253878368): **the obvious
+  workaround does not exist: the Graal calling convention is what reserves the registers.**
+  Compiling entry points with LLVM's C convention instead (graal commit fdfa9444838) fixed the home
+  space and broke everything else, one JNI call earlier: `GetArrayLength` faulted at
+  `movq 0x8(%r15), %rax`, the stack overflow check reading the isolate thread out of R15.
+  `X86RegisterInfo::getReservedRegs` reserves R14 and R15 *iff* the function's calling convention is
+  `CallingConv::GRAAL`; without it the two `llvm.write_register` calls of
+  `InitializeReservedRegistersPrologue` define ordinary allocatable registers whose defs are dead, and
+  LLVM deletes them - the stub simply no longer contains the `movq 0xd0(%rcx), %r14` /
+  `movq %rcx, %r15` pair that the same stub has under the Graal convention. There is no X86
+  subtarget feature to reserve a register independently of the calling convention.
+
+
 ## Decisions
 
 - 2026-09-17 (controller ruling, task 6): **this branch uses the stock `org.bytedeco` jars from
@@ -552,6 +616,33 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   MSYS2 UCRT headers, post-processed by `scripts/llvm/coff-assoc-comdats.py`, and installed as both
   `libunwind.a` and `unwind.lib` under `lib/x86_64-w64-windows-gnu`. Images link it together with
   `kernel32.lib`, `ntdll.lib` and `legacy_stdio_definitions.lib`.
+
+- 2026-09-17 (task 8): **LLVM itself is patched for the Win64 home space, rather than working around it
+  in the backend.** The spec provides for this ("llvm fork branch `graal/22.1.8-win`, only if LLVM
+  itself needs a change"). `X86Subtarget::isCallingConvWin64` now answers `isTargetWin64()` for
+  `CallingConv::GRAAL`, so the Graal convention on Windows is the Win64 convention with two reserved
+  registers - which is what it is meant to be everywhere else. One `case` in a header, no effect off
+  Windows (`isTargetWin64()` is false there). Published as `llvm-22.1.8-graal.3`; the alternative was a
+  C-ABI thunk in front of every entry point, which needs the thunk to carry the method's symbol (the
+  JNI function table reaches the stub through a `MethodPointer`, i.e. through
+  `HostedMethod.getUniqueShortName()`), so the method's real code would have to be renamed and the code
+  cache taught the new name - about sixty lines of naming contract, a permanent hole in the code range
+  where the thunks live, and still wrong for anything else that assumes the platform ABI.
+
+- 2026-09-17 (task 8): **the SEH glue lives in `.text$svm3`, not in `.text$svm1`** (the brief suggested
+  the code section). `LLVMObjectFileReader.parseCode` takes the first section whose name *starts with*
+  `.text$svm1` and every method offset is relative to that section's start, so anything else in it can
+  only cost: at best it inflates the last method's size, at worst - if a pass ever reorders the module
+  so that non-method code lands at offset 0 - it shifts `codeStart` against every recorded offset.
+  `.text$svm3` sorts after the end marker, keeps plain `.text` free of it, and is still adjacent to the
+  code. The shim is never a Java frame and nothing looks its address up.
+
+- 2026-09-17 (task 8): **the JNI transition wrappers stay in plain `.text`, and `.text$svm2` keeps its
+  `.p2align 4`** (both were carry-forward items from the task 7 review). The wrappers are `LinkOnce`,
+  so moving them would put a second `.text$svm1`-named section in the object, exactly the ambiguity
+  `parseCode` cannot afford; and nothing reads the end marker at run time, so making it exact buys
+  nothing. Evidence for both in the findings above.
+
 
 ## Dead ends
 
