@@ -48,14 +48,21 @@ ni=0
 "$NI" -H:+UnlockExperimentalVMOptions --tool:llvm-backend \
   -H:TempDirectory="$W/tmp" -H:+ReportExceptionStackTraces \
   "$@" -cp "$W/classes" "$main" -o "$W/app" || ni=$?
-app="$W/app"; [ -e "$app" ] || app="$W/app.exe"
+# app.exe first: MSYS's stat() appends .exe by itself, so `[ -e "$W/app" ]` is true on
+# Windows too and dumpbin would then be handed an extension-less path it cannot open.
+app="$W/app.exe"; [ -e "$app" ] || app="$W/app"
 win_diag
 [ "$ni" -eq 0 ] || { echo "native-image exited with $ni"; exit "$ni"; }
 echo "== run"
 "$app" > "$W/stdout.txt" 2> "$W/stderr.txt" || { echo "program exited with $?"; cat "$W/stdout.txt" "$W/stderr.txt"; exit 1; }
 cat "$W/stdout.txt"
+# Compare without carriage returns: the program prints CRLF on Windows, and expected.txt
+# arrives there with CRLF as well (the runner checks out with core.autocrlf), while grep
+# strips neither consistently.
+tr -d '\r' < "$W/stdout.txt" > "$W/stdout.lf"
 while IFS= read -r line; do
+  line=${line%$'\r'}
   [ -z "$line" ] && continue
-  grep -qF -- "$line" "$W/stdout.txt" || { echo "missing expected line: $line" >&2; exit 1; }
+  grep -qF -- "$line" "$W/stdout.lf" || { echo "missing expected line: $line" >&2; exit 1; }
 done < "$P/expected.txt"
 echo "DEV-RUN OK"
