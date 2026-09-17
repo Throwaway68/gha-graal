@@ -56,6 +56,24 @@ else
   echo "note: exported-function override unavailable here, skipping the pwd -W preference check"
 fi
 unset -f pwd
+# CRLF on both sides must still match: on Windows the image prints \r\n and expected.txt is
+# checked out with \r\n as well. This guards the normalisation, not the Windows failure itself -
+# a GNU/BSD grep matches the raw pair anyway, so only Git Bash's grep ever rejected it.
+H3=$T/home3; mkdir -p "$H3/bin"; cp "$H/bin/javac" "$H3/bin/javac"
+cat > "$H3/bin/native-image" <<'EOF'
+#!/usr/bin/env bash
+echo "native-image $*" >> "$NI_LOG"
+out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+printf '#!/usr/bin/env bash\nprintf "Hello from the LLVM backend on Fake\\r\\nargs=0\\r\\n"\n' > "$out"; chmod +x "$out"
+EOF
+chmod +x "$H3/bin/native-image"
+mkdir -p "$T/progcrlf"; cp tests/programs/hello/Hello.java "$T/progcrlf/"; printf 'args=0\r\n' > "$T/progcrlf/expected.txt"
+out=$(bash scripts/graalvm/dev-run.sh "$H3" "$T/progcrlf" "$T/work5" 2>&1) \
+  || { rc=$?; echo "$out"; echo "FAIL: CRLF dev-run exited $rc"; exit 1; }
+echo "$out" | grep -q 'DEV-RUN OK' || { echo "$out"; echo "FAIL: CRLF output not matched"; exit 1; }
+# and a real mismatch must still fail with CRLF expectations
+printf 'args=7\r\n' > "$T/progcrlf/expected.txt"
+if bash scripts/graalvm/dev-run.sh "$H3" "$T/progcrlf" "$T/work6" >/dev/null 2>&1; then echo "FAIL: CRLF mismatch not detected"; exit 1; fi
 # Output mismatch must fail
 printf 'args=7\n' > "$T/expected.txt"; mkdir -p "$T/prog"; cp tests/programs/hello/Hello.java "$T/prog/"; cp "$T/expected.txt" "$T/prog/expected.txt"
 if bash scripts/graalvm/dev-run.sh "$H" "$T/prog" "$T/work2" >/dev/null 2>&1; then echo "FAIL: mismatch not detected"; exit 1; fi

@@ -93,6 +93,37 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   on the first of the three commits
   (https://github.com/Throwaway68/gha-graal/actions/runs/35245906387).
 
+- 2026-09-17: **Hello world runs on windows-amd64 with the LLVM backend** (graal commit
+  `c397f423961` on `graal/25.3.4.1-win-llvm`, LLVM release `llvm-22.1.8-graal.3`, dev run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35285287516):
+
+  ```
+  == run
+  Hello from the LLVM backend on Windows Server 2022
+  args=0
+  DEV-RUN OK
+  ```
+
+  `native-image --tool:llvm-backend` generates `app.exe` (7.14 MiB, PE32+ x64, Windows CUI) in
+  1m09s, the image starts, `System.out.println` goes through the JNI function table and back into
+  Java, and the process exits 0. That is the whole chain the last five tasks built: the backend is
+  registered on Windows (task 6), all 5,249 methods go into one COFF object whose `.text$svm1`
+  gives the code range (task 7), and every function names `__svm_seh_personality`, which forwards
+  to libunwind's `_GCC_specific_handler` linked out of the toolchain bundle (task 8). linux-amd64
+  is `DEV-RUN OK` on the same commit and release
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35284148467, `Hello from the LLVM backend
+  on Linux`). Both platforms are green again at the branch head `fea81ecaff4`
+  (windows https://github.com/Throwaway68/gha-graal/actions/runs/35286082187, linux
+  https://github.com/Throwaway68/gha-graal/actions/runs/35286084181).
+
+- 2026-09-17: LLVM release `llvm-22.1.8-graal.3`
+  (https://github.com/Throwaway68/gha-graal/releases/tag/llvm-22.1.8-graal.3, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35282186301), built from
+  `Throwaway68/llvm-project@graal/22.1.8-win` (commit `9d497c85ebdb`, the one-`case` Win64 home
+  space fix). Seven assets, the same set as graal.2, including the Windows libunwind.
+  `llvm-22.1.8-graal.2` is untouched. This is the release the branch consumes from now on and the
+  default of `graalvm-dev.yml`.
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -584,6 +615,86 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `movq %rcx, %r15` pair that the same stub has under the Graal convention. There is no X86
   subtarget feature to reserve a register independently of the calling convention.
 
+
+- 2026-09-17 (task 8, runs https://github.com/Throwaway68/gha-graal/actions/runs/35252597474 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35285287516, `llvm.obj` read from both
+  artifacts): **the Win64 home space, before and after the LLVM fix, in one entry point.**
+  `IsolateEnterStub_JNIFunctions_GetByteArrayRegion` takes five arguments
+  (`env, array, start, len, buf`), so it is exactly the case `CC_X86_Win64_C` without a 32-byte
+  home space gets wrong, and it is on `System.out.println`'s path.
+
+  ```
+  graal.2 (isCallingConvWin64 false for GRAAL)   graal.3 (true)
+  push rbp,r15,r14,r13,r12,rsi,rdi,rbx           push rbp,r15,r14,r13,r12,rsi,rdi,rbx
+  sub  rsp, 0x18                                 sub  rsp, 0x38
+  lea  rbp, [rsp+0x10]                           lea  rbp, [rsp+0x30]
+  mov  rsi, [rbp+0x50]   ; = entry rsp + 8       mov  rsi, [rbp+0x70]   ; = entry rsp + 40
+  mov  r14, [rcx+0xd0]                           mov  r14, [rcx+0xd0]
+  mov  r15, rcx                                  mov  r15, rcx
+  ```
+
+  Win64 puts argument 5 at `entry rsp + 40` (return address plus the caller's 32-byte home space),
+  so the left column reads the buffer pointer 32 bytes low - it lands on the stub's own saved
+  registers - and the image faulted in `JNIFunctions$Support.getPrimitiveArrayRegion`. The right
+  column is correct, and the two `mov`s of the reserved registers survive in both: the function is
+  still on `CallingConv::GRAAL`, which is what makes `X86RegisterInfo::getReservedRegs` reserve R14
+  and R15. The frame grew by exactly 32 bytes, and the stub now also reserves home space for its
+  own calls (`mov [rsp+0x20], rsi` passes argument 5 onward at the Win64 slot). So yes, a Java
+  entry point with more than four arguments runs in the green image; `hello` reaches ten-argument
+  wrappers too (`__llvm_jni_wrapper_f_i64i64i64i64i64i32i32i64i32i32f_native` is in the object).
+
+- 2026-09-17 (task 8, run https://github.com/Throwaway68/gha-graal/actions/runs/35285287516):
+  **`__chkstk` never appears, so the msvc/mingw stack-probe mismatch stayed theoretical.**
+  `objdump -t llvm.obj` of the green image has zero symbols matching `chkstk` - neither `__chkstk`
+  (what `x86_64-pc-windows-msvc` emits) nor `___chkstk_ms` (what `x86_64-w64-windows-gnu` emits).
+  No Java frame in `hello` reaches a page, and libunwind is built with `-mno-stack-arg-probe`
+  (finding above), so neither side asks for a probe. A program with a large frame will pull
+  `__chkstk` out of the MSVC CRT, which `cl.exe /MD` links anyway; the mingw-side symbol is the one
+  that would have no provider, and it is not there.
+
+- 2026-09-17 (task 8, run https://github.com/Throwaway68/gha-graal/actions/runs/35285287516):
+  **the final Windows link inputs.** `WindowsCCLinkerInvocation` runs `cl.exe /MD <image objects>
+  <temp>/unwind.lib /link ... <the usual advapi32/ws2_32/... set> kernel32.lib ntdll.lib
+  legacy_stdio_definitions.lib`. The last four entries are what `LLVMFeature.beforeImageWrite` adds
+  on Windows and nothing else in the build knows about: `unwind.lib` is a copy of
+  `<graalvm>/lib/llvm/lib/x86_64-w64-windows-gnu/libunwind.a` placed in the linker's temp directory
+  (cl.exe forwards an unrecognized extension to the linker as it is, and the temp directory is what
+  `CCLinkerInvocation` relativizes against), `kernel32.lib` and `ntdll.lib` provide the `Rtl*`
+  unwinding imports of libunwind's SEH mode, and `legacy_stdio_definitions.lib` provides `fprintf`,
+  which the UCRT headers define inline and `ucrt.lib` therefore does not export. The link resolves
+  with no unresolved externals; `dumpbin /headers app.exe` reports PE32+ x64, subsystem 3
+  (Windows CUI), entry point `0x1a1e4`, image size `0x725000`.
+
+- 2026-09-17 (task 8, run https://github.com/Throwaway68/gha-graal/actions/runs/35284146085):
+  **the first green image was reported as a failure by the test harness, over carriage returns.**
+  The run printed both program lines, `stderr` was empty and the process exited 0, and `dev-run.sh`
+  still ended in `missing expected line: args=0`. The image writes CRLF (`stdout.txt` in the
+  artifact is `...2022\r\nargs=0\r\n`) and `expected.txt` arrives on the runner with CRLF of its
+  own - the Windows checkout converts line endings, which this journal already noted for `suite.py`
+  and `hashFiles`. So `grep -qF -- "$line" stdout.txt` searched for `args=0\r`. A GNU or BSD grep
+  finds that inside `args=0\r\n` and the check passes; Git Bash's grep evidently treats its input as
+  text and strips the `\r` from the line it compares while keeping it in the pattern, so the same
+  pair does not match there - which is also why the case cannot be reproduced off Windows. Both
+  sides are stripped before comparing now (`tr -d '\r'` on the output, `${line%$'\r'}` on the
+  expectation), which is correct under either grep. Worth remembering for every
+  future Windows expectation in this repository - and worth reading a "failed" Windows dev run's
+  `stdout.txt` before believing it. The same run also showed `dumpbin` failing with `LNK1181:
+  cannot open input file '...\work\app'`: MSYS's `stat()` appends `.exe` by itself, so
+  `[ -e "$W/app" ]` is true on Windows and the diagnostics were handed an extension-less path.
+
+- 2026-09-17 (task 8, runs https://github.com/Throwaway68/gha-graal/actions/runs/35255939184 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35282186301): **`gh release create <tag>
+  assets/*` cannot publish this bundle, and a failed upload takes the release with it.** Five
+  attempts at `llvm-22.1.8-graal.3` from run 35255939184 died in `HTTP 500: Error saving asset`
+  from uploads.github.com on the ~1 GB tarballs, and `gh release create` deletes the release it
+  just made when any asset fails, so each attempt left nothing behind and all three platform builds
+  had to be kept alive as artifacts. `llvm.yml` now creates the release as a **draft with no
+  assets**, uploads each file on its own with up to six attempts a minute apart
+  (`gh release upload --clobber`), verifies every published asset against the local file's size and
+  its `uploaded` state, and only then clears the draft flag; an existing *published* release of the
+  same tag aborts the job instead of being touched. On run 35282186301 all seven assets went up on
+  the first attempt in 2m06s total, which suggests the 500s came from `gh`'s five-way concurrent
+  upload rather than from size alone - one at a time is both slower and reliable.
 
 ## Decisions
 

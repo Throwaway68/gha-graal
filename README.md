@@ -11,13 +11,18 @@ linux-amd64, windows-amd64 and darwin-aarch64. Design: `docs/superpowers/specs/2
 | `Throwaway68/llvm-project` | `graal/22.1.8` | llvmorg-22.1.8 + the four patches from graal's `sdk/llvm-patches` |
 | `Throwaway68/llvm-project` | `graal/22.1.8-win` | the above + `CallingConv::GRAAL` is Win64 on Windows (see below) |
 | `Throwaway68/graal` | `graal/25.3.4.1-ci` | graal-25.3.4.1 + LLVM backend registered on darwin-aarch64 |
+| `Throwaway68/graal` | `graal/25.3.4.1-win-llvm` | graal-25.3.4.1 + the Native Image LLVM backend on windows-amd64 (hello world green, see the journal) |
 
 ## Workflows
 
 **LLVM toolchain** (`llvm.yml`): `gh workflow run llvm.yml -f llvm_ref=graal/22.1.8 -f version=22.1.8-graal.2`.
 Publishes release `llvm-<version>` with `llvm-<version>-<platform>.tar.gz`,
 `compiler-rt-<version>-linux-amd64.tar.gz`, `llvm-src-<version>.tar.gz`,
-`llvm-lldonly-<version>-darwin-aarch64.tar.gz` and `manifest.json` (sha512).
+`llvm-lldonly-<version>-darwin-aarch64.tar.gz` and `manifest.json` (sha512). The release is
+created as a draft, each asset is uploaded on its own with retries and verified against the
+local file, and the draft flag is cleared last - uploads.github.com returns HTTP 500 often
+enough on the ~1 GB bundles that a single `gh release create <tag> assets/*` loses the whole
+release. An existing published release of the same tag fails the job instead of being touched.
 The windows-amd64 bundle also carries libunwind built in SEH mode for
 `x86_64-w64-windows-gnu` (`lib/x86_64-w64-windows-gnu/libunwind.a`, the same archive as
 `unwind.lib`, and `include/unwind.h`), which the Native Image LLVM backend links into images.
