@@ -16,6 +16,8 @@ set -euo pipefail
 
 [ $# -eq 3 ] || { echo "usage: build-unwind-win.sh <llvm-src-dir> <clang-install-dir> <out-dir>" >&2; exit 2; }
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 winpath() {  # cmake and clang want C:/... paths, not /c/... MSYS paths
   if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
 }
@@ -83,7 +85,14 @@ LIB=$(find "$OUT" -name libunwind.a | head -1)
 mkdir -p "$OUT/lib/$TRIPLE"
 [ "$LIB" = "$OUT/lib/$TRIPLE/libunwind.a" ] || cp "$LIB" "$OUT/lib/$TRIPLE/libunwind.a"
 LIB=$OUT/lib/$TRIPLE/libunwind.a
-# link.exe goes by the extension, so hand it a .lib copy of the very same archive.
+
+echo "== make the unwind COMDATs linkable by link.exe"
+PY=$(command -v python3 || command -v python || true)
+[ -n "$PY" ] || { echo "python is needed for coff-assoc-comdats.py" >&2; exit 1; }
+"$PY" "$SCRIPT_DIR/coff-assoc-comdats.py" "$LIB"
+
+# link.exe also accepts the .a extension, but Native Image's linker invocation
+# builds library arguments as <name>.lib, so install the archive under that name too.
 cp "$LIB" "$OUT/lib/$TRIPLE/unwind.lib"
 
 mkdir -p "$OUT/include"
@@ -93,19 +102,22 @@ done
 ls -l "$OUT/include"
 
 NM="$CLANG/bin/llvm-nm.exe"
+export LC_ALL=C
+"$NM" --defined-only "$LIB" | awk 'NF>=3 && $2 ~ /^[A-Za-z]$/ {print $3}' | sort -u > "$OUT/libunwind-defined.txt"
+
 echo "== defined symbols of interest"
-DEFINED=$("$NM" --defined-only "$LIB" | awk '$2=="T"||$2=="D"{print $3}' | sort -u)
 missing=
 for s in _Unwind_RaiseException _Unwind_Resume _Unwind_DeleteException _Unwind_Backtrace \
          _GCC_specific_handler _Unwind_GetLanguageSpecificData _Unwind_GetRegionStart \
          _Unwind_GetIP _Unwind_GetIPInfo _Unwind_SetIP _Unwind_GetGR _Unwind_SetGR; do
-  if printf '%s\n' "$DEFINED" | grep -qx "$s"; then echo "  ok      $s"; else echo "  MISSING $s"; missing="$missing $s"; fi
+  if grep -qx "$s" "$OUT/libunwind-defined.txt"; then echo "  ok      $s"; else echo "  MISSING $s"; missing="$missing $s"; fi
 done
 [ -z "$missing" ] || { echo "libunwind.a lacks:$missing" >&2; exit 1; }
 
-echo "== undefined symbols (must all resolve against ucrt/kernel32/ntdll)"
-"$NM" --undefined-only "$LIB" | awk '$1=="U"||$1=="w"{print $2}' | sort -u | tee "$OUT/libunwind-undefined.txt"
-if grep -Eq '^_*(_chkstk_ms|mingw_|gcc_personality|libunwind_dummy)' "$OUT/libunwind-undefined.txt"; then
+echo "== undefined symbols (archive-internal ones filtered out; the rest must come from ucrt/kernel32/ntdll)"
+"$NM" --undefined-only "$LIB" | awk '$1=="U"||$1=="w"{print $2}' | sort -u > "$OUT/libunwind-undefined-raw.txt"
+comm -23 "$OUT/libunwind-undefined-raw.txt" "$OUT/libunwind-defined.txt" | tee "$OUT/libunwind-undefined.txt"
+if grep -Eq '^_*(_chkstk_ms|mingw_|gcc_personality|libgcc)' "$OUT/libunwind-undefined.txt"; then
   echo "libunwind.a references mingw/libgcc runtime symbols that the MSVC link cannot resolve" >&2
   exit 1
 fi

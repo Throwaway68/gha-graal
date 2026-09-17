@@ -24,3 +24,4 @@ scripts/llvm/build-unwind-win.sh
 .github/workflows/spike-win-eh.yml
 tests/spike/win-eh/lsda.ll
 tests/spike/win-eh/unwindtest.c
+scripts/llvm/coff-assoc-comdats.py

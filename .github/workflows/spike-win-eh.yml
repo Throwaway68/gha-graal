@@ -73,20 +73,21 @@ jobs:
           # cl and link accept '-' options; '/' options would be mangled by MSYS path conversion.
           LIBDIR=$(cygpath -m "$GITHUB_WORKSPACE")/unwind-out/lib/x86_64-w64-windows-gnu
           cd ci/tests/spike/win-eh
-          echo "== link against libunwind.a"
-          if cl -nologo -MD -O2 unwindtest.c -Fe:unwindtest-a.exe \
-               -link -INCREMENTAL:NO -NODEFAULTLIB:LIBCMT "$LIBDIR/libunwind.a" kernel32.lib ntdll.lib; then
-            echo "DOT_A_ACCEPTED_BY_LINK_EXE: yes"; A_OK=1
-          else
-            echo "DOT_A_ACCEPTED_BY_LINK_EXE: no"; A_OK=0
-          fi
-          echo "== link against unwind.lib (same archive, renamed)"
-          cl -nologo -MD -O2 unwindtest.c -Fe:unwindtest.exe \
-             -link -INCREMENTAL:NO -NODEFAULTLIB:LIBCMT "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib
-          echo "== run"
-          ./unwindtest.exe | tee run.txt
+          try_link() { cl -nologo -MD -O2 unwindtest.c -Fe:"$1" -link -INCREMENTAL:NO -NODEFAULTLIB:LIBCMT "${@:2}"; }
+          echo "== A: libunwind.a, no legacy_stdio_definitions"
+          if try_link probe-a.exe "$LIBDIR/libunwind.a" kernel32.lib ntdll.lib; then A=yes; else A=no; fi
+          echo "== B: unwind.lib, no legacy_stdio_definitions"
+          if try_link probe-lib.exe "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib; then B=yes; else B=no; fi
+          echo "== C: unwind.lib + legacy_stdio_definitions.lib"
+          if try_link probe-legacy.exe "$LIBDIR/unwind.lib" kernel32.lib ntdll.lib legacy_stdio_definitions.lib; then C=yes; else C=no; fi
+          { echo "link accepts the .a extension: $A"
+            echo "link accepts unwind.lib: $B"
+            echo "link with legacy_stdio_definitions.lib: $C"; } | tee link.txt
+          EXE=probe-lib.exe; [ "$B" = yes ] || EXE=probe-legacy.exe
+          [ -f "$EXE" ] || { echo "no test executable was produced" >&2; exit 1; }
+          echo "== run $EXE"
+          "./$EXE" | tee run.txt
           grep -q 'SPIKE OK' run.txt
-          echo "dot-a accepted: $A_OK" | tee -a run.txt
       - name: 4. Toolchain launch without the .exe suffix
         shell: bash
         run: |
