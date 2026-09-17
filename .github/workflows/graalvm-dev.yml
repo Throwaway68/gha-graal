@@ -92,6 +92,13 @@ jobs:
       # success()`, so a job that fails at dev-run (the expected Windows outcome until the
       # backend works) would never save its build. Saving explicitly after the build keeps
       # every iteration cached.
+      #
+      # No restore-keys: mx decides what to rebuild from file timestamps, and a checkout
+      # stamps every source with the time of the run, so a cache from a *different* graal
+      # commit is rebuilt from scratch anyway - measured on windows-amd64 (runs 35216649197
+      # and 35217642476): restoring 5 GB costs ~2 min and saves nothing. Only an exact hit,
+      # i.e. the same graal commit run again (another program, other ni_args, a re-run),
+      # is worth restoring.
       - name: Restore build cache
         id: cache
         uses: actions/cache/restore@v4
@@ -100,15 +107,38 @@ jobs:
             graal/*/mxbuild
             jdk-dl
           key: dev-${{ inputs.platform }}-${{ env.JDK_ID }}-${{ env.GRAAL_SHA }}
-          restore-keys: |
-            dev-${{ inputs.platform }}-${{ env.JDK_ID }}-
-            dev-${{ inputs.platform }}-
       - name: Cache state
         shell: bash
         run: |
           echo "primary key: ${{ steps.cache.outputs.cache-primary-key }}"
           echo "matched key: ${{ steps.cache.outputs.cache-matched-key }}"
           echo "exact hit:   ${{ steps.cache.outputs.cache-hit }}"
+      - name: Age the graal checkout to the restored build
+        if: steps.cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          # mx rebuilds a project when a source file is newer than its output. actions/checkout
+          # stamps every graal source with the time of this run while the cache restores mxbuild
+          # with the mtimes of the run that built it, so without this the whole GraalVM is
+          # rebuilt ("...HostProxyException.class[11:38:28] is older than
+          # ...HostProxyException.java[11:49:01]" in run 35217642476). The cache key carries the
+          # graal SHA, so on an exact hit this checkout is the one that produced the cache and
+          # the restored outputs really are up to date. Exact hits only - there is no
+          # restore-keys fallback, so this never hides a source change.
+          import os
+          stamp = 946684800  # 2000-01-01T00:00:00Z, older than any cached build output
+          n = 0
+          for dirpath, dirnames, filenames in os.walk('graal'):
+              dirnames[:] = [d for d in dirnames if d not in ('.git', 'mxbuild')]
+              for name in filenames:
+                  try:
+                      os.utime(os.path.join(dirpath, name), (stamp, stamp))
+                      n += 1
+                  except OSError:
+                      pass
+          print(f'backdated {n} files in the graal checkout to 2000-01-01')
+          EOF
       - name: Fetch LabsJDK
         shell: bash
         # Run inside the graal checkout so mx resolves labsjdk-ce-latest from graal/common.json.
