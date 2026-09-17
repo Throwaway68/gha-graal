@@ -190,11 +190,12 @@ jobs:
               except OSError:
                   return False
           n = sum(touch(p) for p in files)
-          # Directories after the files and deepest first, then re-stamped until they stay put:
-          # NTFS duplicates a file's timestamps into its parent's index entry and bumps the
-          # parent's mtime when it flushes that, which silently undid the first pass
-          # (run 35223782654 still saw "ninja explain: output build.ninja older than most recent
-          # input .../include", with the include directory carrying the time of this step).
+          # Directories after the files and deepest first, then re-stamped while they still look
+          # new. This is best effort on NTFS and cannot be made reliable there: the file
+          # timestamps are duplicated into the parent's index entry and flushed asynchronously,
+          # so a directory that verifies as old here comes back with the current time a second
+          # later (run 35223782654: verified at 13:21:16.8, read by ninja as 13:21:18.4). The
+          # "Freshen the restored build outputs" step below is what actually wins that race.
           dirs.reverse()
           left, passes = dirs, 0
           while left and passes < 5:
