@@ -49,6 +49,28 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   branch head (https://github.com/Throwaway68/gha-graal/actions/runs/35239817876), so the
   header-free unwind declarations are a no-op where the header exists.
 
+- 2026-09-17: **Windows reaches the LLVM link stage** (graal commit ae2a36f7040, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35242773448). With the stock
+  `org.bytedeco` jars, `native-image --tool:llvm-backend` on windows-amd64 runs the whole pipeline
+  - `[6/8] Compiling methods` (16.8s), `[7/8] Laying out methods` (20.1s) - and fails exactly where
+  the plan expects Task 7 to take over:
+
+  ```
+  jdk.graal.compiler.debug.GraalError: Native linking failed into the final object file (D:\a\gha-graal\gha-graal\work\tmp\SVM-1789660848999\llvm\llvm.o): 1
+      at ...LLVMToolchainUtils.nativeLink(LLVMToolchainUtils.java:140)
+      at ...LLVMNativeImageCodeCache.linkCompiledBatches(LLVMNativeImageCodeCache.java:205)
+  ```
+
+  The run artifact holds the six inputs of that link, `b0.o`..`b5.o`, and they are real x86-64
+  COFF: `file b0.o` says "Intel amd64 COFF object file, not stripped, 33 sections, 5197 symbols".
+  So `llc` consumes the `x86_64-pc-windows-msvc` bitcode the backend emits and produces usable
+  objects; what is left is `lld-link -r -o llvm.o b0.o ...`, and `-r` is a GNU-ld flag that the
+  MSVC-style `lld-link` driver does not have (`LLVMObjectFile.getLld()` maps PECOFF to
+  `lld-link`). Note for task 7: `nativeLink` swallows the linker's own message into
+  `debug.log("%s", e.getOutput())`, so the console shows only the exit status. linux-amd64 is
+  `DEV-RUN OK` on the same commit
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35242758887, 7m43s).
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -345,6 +367,54 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `Error: Unknown name in option specification: tool:llvm-backend` (exit 20), the same way the tag
   behaves on Windows.
 
+- 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35241867510,
+  https://github.com/Throwaway68/gha-graal/actions/runs/35242758887 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35242773448, graal commits 728e8da48ff and
+  ae2a36f7040): **what dropping the shadowing costs, end to end.** The four suite.py libraries keep
+  their names - `LLVM_WRAPPER_SHADOWED`, `JAVACPP_SHADOWED`, `LLVM_PLATFORM_SPECIFIC_SHADOWED`,
+  `JAVACPP_PLATFORM_SPECIFIC_SHADOWED`, so `tool-llvm.properties`' `ImageBuilderModulePath` and
+  SVM_LLVM's `exclude` list are untouched - and now point at
+  `https://repo1.maven.org/maven2/org/bytedeco/{llvm/13.0.1-1.5.7,javacpp/1.5.7}`. The module names
+  are what the jars declare (`javap` on their `META-INF/versions/9/module-info.class`):
+  `org.bytedeco.llvm`, `org.bytedeco.javacpp` and `org.bytedeco.<llvm|javacpp>.<os>.<arch>`; all
+  twelve say `Multi-Release: true`, unlike Oracle's macosx-arm64 pair. Every digest was computed
+  from the downloaded bytes and cross-checked against Maven Central's published `.sha1` - 14 of 14
+  match, 936 MB. `linux-riscv64` has no 13.0.1-1.5.7 build, so that entry is gone and riscv64 falls
+  to `"<others>": {"optional": True}`. In the sources it is 42 imports across 10 files of
+  `com.oracle.svm.core.graal.llvm` plus the two class names in `SVMHost`'s shared-layer forbidden
+  module list.
+
+  One thing does not follow from a rename: `NativeImageGeneratorRunner.checkBootModuleDependencies`
+  rejects anything the builder modules read outside a fixed allowlist, and the LLVM backend's
+  exemption there is spelled `startsWith("com.oracle.svm.shadowed.")`. Stock jars therefore stopped
+  the build before it started, on every platform:
+
+  ```
+  Fatal error: com.oracle.svm.shared.util.VMError$HostedError: Unexpected image builder module-dependencies: jdk.unsupported, org.bytedeco.javacpp.linux.x86_64, org.bytedeco.llvm.linux.x86_64, org.bytedeco.javacpp, org.bytedeco.llvm
+  ```
+
+  (`jdk.unsupported` shows up only because the walk now enters `org.bytedeco.javacpp`, which
+  requires it; the shadowed module was skipped before it could be entered.) The exemption now
+  covers `org.bytedeco.` as well.
+
+- 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35241895761 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35242787328): **darwin-aarch64 is no longer
+  blocked by its jars, it is blocked by our LLVM build.** With the stock macosx-arm64 jars the
+  module resolves, `mx build` archives SVM_LLVM, and `native-image --tool:llvm-backend` gets
+  through `[7/8] Laying out methods` before every batch fails in `llc`:
+
+  ```
+  LLVM compilation failed for batch 1 (f1000-f2000) ... : 1
+  Command: llc -relocation-model=pic --trap-unreachable -march=aarch64 --frame-pointer=all --aarch64-frame-record-on-top -O2 -filetype=obj -o b1.o b1o.bc
+  ```
+
+  `--aarch64-frame-record-on-top` is a GraalVM patch to LLVM and
+  `Throwaway68/llvm-project@graal/22.1.8` does not carry it (`frame-record-on-top` appears zero
+  times in `llvm/lib/Target/AArch64/AArch64FrameLowering.cpp` on both of its branches). It is an
+  aarch64-only flag - amd64 passes `-march=x86-64` and nothing like it - so it does not touch the
+  Windows port and was not investigated further. Anyone who wants darwin-aarch64 or linux-aarch64
+  green needs that patch in the LLVM release first.
+
 - 2026-09-17 (the user's tip): GitHub Actions runners can be reached over **ssh for interactive
   debugging** (a tmate/upterm-style step), which beats a full workflow round trip per attempt when
   the same 10-minute Windows job is being poked at repeatedly. `graalvm-dev.yml` now has an opt-in
@@ -354,6 +424,15 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   https://github.com/settings/keys for the session to be usable.
 
 ## Decisions
+
+- 2026-09-17 (controller ruling, task 6): **this branch uses the stock `org.bytedeco` jars from
+  Maven Central on every platform**, not Oracle's `com.oracle.svm.shadowed.org.bytedeco` builds.
+  The shadowing exists so that a user classpath which also uses JavaCPP cannot clash with the
+  builder's copy; that isolation is worth less here than having the LLVM backend run on Windows at
+  all, and the shadowed artifacts simply do not exist for windows-x86_64 (see the finding on their
+  native symbol names). The price is divergence from upstream in 11 files the port would otherwise
+  not touch. Consequence: the release `jars-1.5.7-graal.1` built in task 4 is **unused** - nothing
+  references it any more. It stays published as the record of what was tried.
 
 - 2026-09-17 (controller ruling, task 5 review): the dev workflow caches **only** mx's downloads.
   No cache of build outputs, and no timestamp manipulation of the checkout, the JDK or `mxbuild`:
