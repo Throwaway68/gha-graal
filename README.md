@@ -35,6 +35,26 @@ and `manifest.json`.
    drop the Windows exclusion there and the smoke test picks the backend up automatically
    (it checks for `lib/svm/tools/llvm-backend`).
 
+## Platform status (2026-09-17)
+
+| Platform | LLVM toolchain | Sulong (`lli`) | Native Image LLVM backend |
+|----------|----------------|----------------|---------------------------|
+| linux-amd64 | yes | yes | yes, smoke-tested (`--tool:llvm-backend`) |
+| windows-amd64 | yes | yes | no: the backend has no Windows code path (unwinding, partial link, objcopy) |
+| darwin-aarch64 | yes | yes | no: blocked by GR-34811 |
+
+The `graal/25.3.4.1-ci` branch registers the backend on darwin-aarch64, but the image
+builder then aborts with "Unexpected image builder module-dependencies": in
+`substratevm/mx.substratevm/suite.py` the darwin/aarch64 entries of
+`LLVM_PLATFORM_SPECIFIC_SHADOWED` and `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` are the only
+ones without a `moduleName`, so those JavaCPP jars load as automatic modules. Making the
+macOS backend work needs modular (module-info) builds of those two jars for macosx-arm64.
+Releases are therefore built from the pristine `graal-25.3.4.1` tag.
+
+The backend's tool macro sets the experimental `-H:CompilerBackend=llvm` option, so use
+`native-image -H:+UnlockExperimentalVMOptions --tool:llvm-backend ...` (or leave
+`NATIVE_IMAGE_EXPERIMENTAL_OPTIONS_ARE_FATAL` unset).
+
 ## Local checks
 
     python3 -m pytest tests -q
