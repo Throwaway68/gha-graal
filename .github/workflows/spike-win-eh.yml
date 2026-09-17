@@ -59,9 +59,15 @@ jobs:
           echo "== handler data in the assembly"
           sed -n '/seh_handlerdata/,$p' lsda.s > handlerdata.txt
           head -40 handlerdata.txt
-          grep -q '__svm_seh_personality' relocs.txt && echo "personality relocated into .xdata: yes"
-          grep -q 'Call site Encoding' handlerdata.txt && echo "Itanium LSDA (GCC except table) emitted: yes"
-          grep -E 'Flags|Handler' unwind.txt | head -8 || true
+          grep -q '__svm_seh_personality' relocs.txt ||
+            { echo "FAIL: no personality relocation in .xdata" >&2; exit 1; }
+          echo "personality relocated into .xdata: yes"
+          grep -q 'Call site Encoding' handlerdata.txt ||
+            { echo "FAIL: no Itanium LSDA (GCC except table) after the personality" >&2; exit 1; }
+          echo "Itanium LSDA (GCC except table) emitted: yes"
+          grep -q 'ExceptionHandler' unwind.txt ||
+            { echo "FAIL: .xdata carries no exception handler flag" >&2; exit 1; }
+          grep -E 'Flags|Handler' unwind.txt | sed -n '1,8p'  # sed, not head: no SIGPIPE under pipefail
       - name: 2. Build libunwind (SEH)
         shell: bash
         run: bash ci/scripts/llvm/build-unwind-win.sh "$GITHUB_WORKSPACE/llvm-src" "$GITHUB_WORKSPACE/llvm" "$GITHUB_WORKSPACE/unwind-out"

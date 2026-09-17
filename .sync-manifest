@@ -25,3 +25,4 @@ scripts/llvm/build-unwind-win.sh
 tests/spike/win-eh/lsda.ll
 tests/spike/win-eh/unwindtest.c
 scripts/llvm/coff-assoc-comdats.py
+tests/test_coff_assoc_comdats.py
