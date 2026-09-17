@@ -126,3 +126,9 @@ if [ "$PLATFORM" = linux-amd64 ]; then
   rm -rf "$CRT_INSTALL/stage"
   find "$CRT_INSTALL" -type f
 fi
+
+if [ "$PLATFORM" = windows-amd64 ]; then
+  echo "== libunwind (SEH mode) for the Native Image LLVM backend"
+  bash "$(dirname "$0")/build-unwind-win.sh" "$SRC" "$INSTALL" "$INSTALL"
+  ls -la "$INSTALL/lib/x86_64-w64-windows-gnu/" "$INSTALL/include/unwind.h"
+fi

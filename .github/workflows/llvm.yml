@@ -10,7 +10,7 @@ on:
         type: string
       version:
         description: 'Version label used in asset names; the release tag is llvm-<version>'
-        default: '22.1.8-graal.1'
+        default: '22.1.8-graal.2'
         required: true
         type: string
       publish:
@@ -129,6 +129,7 @@ jobs:
           LLVM toolchain for GraalVM, built from \`Throwaway68/llvm-project@${{ inputs.llvm_ref }}\`
           (llvmorg-22.1.8 + graal patches). Projects: clang, lld. Targets: X86, AArch64.
           Runtimes (linux/darwin): compiler-rt builtins, libunwind, libc++abi, libc++.
+          Windows: libunwind (SEH mode) under lib/x86_64-w64-windows-gnu/ for the Native Image LLVM backend.
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
           gh release create "llvm-${{ inputs.version }}" assets/* \

@@ -13,10 +13,13 @@ linux-amd64, windows-amd64 and darwin-aarch64. Design: `docs/superpowers/specs/2
 
 ## Workflows
 
-**LLVM toolchain** (`llvm.yml`): `gh workflow run llvm.yml -f llvm_ref=graal/22.1.8 -f version=22.1.8-graal.1`.
+**LLVM toolchain** (`llvm.yml`): `gh workflow run llvm.yml -f llvm_ref=graal/22.1.8 -f version=22.1.8-graal.2`.
 Publishes release `llvm-<version>` with `llvm-<version>-<platform>.tar.gz`,
 `compiler-rt-<version>-linux-amd64.tar.gz`, `llvm-src-<version>.tar.gz`,
 `llvm-lldonly-<version>-darwin-aarch64.tar.gz` and `manifest.json` (sha512).
+The windows-amd64 bundle also carries libunwind built in SEH mode for
+`x86_64-w64-windows-gnu` (`lib/x86_64-w64-windows-gnu/libunwind.a`, the same archive as
+`unwind.lib`, and `include/unwind.h`), which the Native Image LLVM backend links into images.
 
 **GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-ci -f llvm_release=llvm-22.1.8-graal.1`.
 Builds any graal ref against the LLVM release: graal's downloads from
