@@ -183,13 +183,42 @@ jobs:
       # the log. That account needs a key at https://github.com/settings/keys; with none, tmate
       # authorizes nobody and the session is unusable (deliberately - do not lower this to
       # `auto`, which would leave the runner open to anyone reading the log).
+      #
+      # Detached, so that the address can be published: a job's log is not readable through the
+      # API while the job runs, so an attached session's connection string never reaches the
+      # caller. In detached mode the action returns it as a step output, the next steps write it
+      # into the artifact `tmate-<platform>` - artifacts are downloadable as soon as they are
+      # uploaded - and the job then waits on a file that the session deletes when it is done.
       - name: Debug over ssh (tmate)
+        id: tmate
         if: ${{ !cancelled() && inputs.debug_ssh }}
-        timeout-minutes: 180
         uses: mxschmitt/action-tmate@v3.24
         with:
           limit-access-to-actor: true
           connect-timeout-seconds: 300
+          detached: true
+      - name: Publish the ssh address
+        if: ${{ !cancelled() && inputs.debug_ssh }}
+        shell: bash
+        run: |
+          mkdir -p tmate
+          printf '%s\n%s\n' '${{ steps.tmate.outputs.ssh-command }}' '${{ steps.tmate.outputs.web-url }}' | tee tmate/address.txt
+      - name: Upload the ssh address
+        if: ${{ !cancelled() && inputs.debug_ssh }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: tmate-${{ inputs.platform }}
+          path: tmate/address.txt
+      - name: Hold the runner for the ssh session
+        if: ${{ !cancelled() && inputs.debug_ssh }}
+        timeout-minutes: 180
+        shell: bash
+        run: |
+          hold=$RUNNER_TEMP/gha-hold
+          : > "$hold"
+          echo "holding the runner; in the ssh session run: rm '$hold'"
+          while [ -f "$hold" ]; do sleep 15; done
+          echo "hold released"
       - name: Upload work directory
         uses: actions/upload-artifact@v7.0.1
         if: always()
