@@ -32,6 +32,10 @@ on:
         description: 'Extra native-image arguments'
         default: ''
         type: string
+      debug_ssh:
+        description: 'Open an interactive ssh/tmate session on the runner after dev-run'
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -168,6 +172,24 @@ jobs:
       - name: dev-run
         shell: bash
         run: bash ci/scripts/graalvm/dev-run.sh "$GRAALVM_HOME" "ci/tests/programs/${{ inputs.program }}" "$GITHUB_WORKSPACE/work" ${{ inputs.ni_args }}
+      # Interactive debugging instead of a workflow round trip per attempt (the user's tip): with
+      # `debug_ssh` on, the job stops here - after the build and after dev-run, whichever failed -
+      # and prints an ssh command and a web-shell URL for this runner. The session ends when you
+      # type `exit` (or after the step timeout), then the job finishes normally and still uploads
+      # the artifact.
+      #
+      # `limit-access-to-actor: true` authorizes only the public SSH keys of the account that
+      # dispatched the run, because this repository is public and the connection string lands in
+      # the log. That account needs a key at https://github.com/settings/keys; with none, tmate
+      # authorizes nobody and the session is unusable (deliberately - do not lower this to
+      # `auto`, which would leave the runner open to anyone reading the log).
+      - name: Debug over ssh (tmate)
+        if: ${{ !cancelled() && inputs.debug_ssh }}
+        timeout-minutes: 45
+        uses: mxschmitt/action-tmate@v3.24
+        with:
+          limit-access-to-actor: true
+          connect-timeout-seconds: 300
       - name: Upload work directory
         uses: actions/upload-artifact@v7.0.1
         if: always()

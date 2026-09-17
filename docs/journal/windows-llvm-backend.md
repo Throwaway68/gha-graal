@@ -38,6 +38,16 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `dev-<platform>-<program>` artifact carries `work/stdout.txt`, `work/stderr.txt`, the
   native-image reports and the LLVM objects of the run.
 
+- 2026-09-17: **Windows enters the LLVM pipeline** (graal commit 9aad563fd45 on
+  `graal/25.3.4.1-win-llvm`, run https://github.com/Throwaway68/gha-graal/actions/runs/35236412885).
+  `svml` is registered on windows-amd64, `mx build` succeeds against the windows-x86_64 shadowed
+  jars, the module gate passes, and `native-image --tool:llvm-backend` gets through analysis and
+  into `SubstrateLLVMBackend.emitLLVM` -> `LLVMGenerator.<init>` -> `LLVMIRBuilder.<init>` in
+  [6/8] Compiling methods. It does not get out of that constructor yet - see the finding below on
+  the shadowed native libraries. The same commit is neutral on linux-amd64: `DEV-RUN OK`
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35236400414, 7m44s), so the header-free
+  unwind declarations are a no-op where the header exists.
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -238,6 +248,80 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   against come from `https://lafo.ssw.uni-linz.ac.at/pub/graal-external-deps/native-image/` as
   `llvm-shadowed-13.0.1-1.5.7.jar` and `javacpp-shadowed-1.5.7.jar` (the `_1` names are 404); the llvm
   descriptor needs both on javac's module path, since the llvm module requires javacpp.
+
+- 2026-09-17 (task 6, runs https://github.com/Throwaway68/gha-graal/actions/runs/35236400414 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35236412885): **opening the backend for
+  Windows takes five edits, and they hold.** `mx_substratevm.py` registers `ce_llvm_backend`
+  unconditionally, suite.py points windows-amd64 at the `jars-1.5.7-graal.1` jars and gives
+  darwin-aarch64 the `moduleName` it was missing, `LLVMFeature` adds `Platform.WINDOWS`,
+  `getTargetTriple()` returns `-pc-windows-msvc` (so `x86_64-pc-windows-msvc`), `LLVMDirectives`
+  returns no header and no library on Windows, and `LLVMExceptionUnwind`'s `@CConstant` reason
+  codes plus the two `@CStruct` views become fixed Itanium values and a `@RawStructure`. Windows
+  builds the GraalVM in 7m54s (10m55s for the job) and reaches the LLVM pipeline; Linux still prints `DEV-RUN OK`, which
+  is what proves the header-free declarations changed no behaviour. Two things the edits taught:
+  a `@RawStructure` field needs a getter **and** a setter (`InfoTreeBuilder.verifyRawStructFieldAccessors`
+  rejects a lone getter), and a raw structure must not be nested in a `@CContext` class -
+  `NativeLibraries.getDirectives` walks the enclosing types, so it would land in the LLVM context,
+  and `RawStructureLayoutPlanner.plan` returns immediately for any context that is not the built-in
+  one, leaving the field offsets unplanned. Both structures are therefore top-level types in
+  `LLVMExceptionUnwind.java`. Their offsets come out right because the planner sorts by field size
+  descending over an alphabetically ordered map: with eight one-word fields that is
+  `exception_class` at 0, `exception_cleanup` at 8, `private0`..`private5` at 16..56, which is the
+  C layout libunwind expects (it hands the first field's value to the personality function as its
+  `exceptionClass` argument).
+
+- 2026-09-17 (run https://github.com/Throwaway68/gha-graal/actions/runs/35236412885):
+  **the windows-x86_64 shadowed jars do not work, because shadowing a JavaCPP jar is not entry
+  renaming - it is a rebuild of the native libraries.** This corrects the finding above dated
+  2026-09-17 ("the shadowed platform jars are a pure repackaging"): that check looked for `.class`
+  files and found none, but the JNI names live inside the binaries. The Windows run fails at
+  [5/8]/[6/8] with
+
+  ```
+  Error loading class org/bytedeco/javacpp/Loader.
+  Error loading class org/bytedeco/javacpp/Loader.
+  ```
+
+  and then
+
+  ```
+  Caused by: jdk.graal.compiler.debug.GraalError: java.lang.NoClassDefFoundError: Could not initialize class com.oracle.svm.shadowed.org.bytedeco.llvm.global.LLVM
+      at org.graalvm.nativeimage.llvm/com.oracle.svm.core.graal.llvm.util.LLVMIRBuilder.<init>(LLVMIRBuilder.java:97)
+  Caused by: java.lang.ExceptionInInitializerError: Exception java.lang.NoClassDefFoundError: org/bytedeco/javacpp/Loader [in thread "ForkJoinPool.commonPool-worker-1"]
+      at java.base/jdk.internal.loader.NativeLibraries.load(Native Method)
+      ...
+      at com.oracle.svm.shadowed.org.bytedeco.llvm/com.oracle.svm.shadowed.org.bytedeco.llvm.global.LLVM.<clinit>(LLVM.java:14)
+  ```
+
+  The DLL loads and its `JNI_OnLoad` then looks for the class it was generated against. `strings` on
+  the payloads says why: Oracle's `libjnijavacpp.so` in
+  `javacpp-shadowed-1.5.7_1-linux-x86_64.jar` exports
+  `Java_com_oracle_svm_shadowed_org_bytedeco_javacpp_Pointer_allocate`, while our
+  `jnijavacpp.dll` exports `Java_org_bytedeco_javacpp_Pointer_allocate` and embeds
+  `org/bytedeco/javacpp/Loader`; `jniLLVM.dll` (75 MB, statically linked LLVM 13) has 2107
+  `Java_org_bytedeco_*` symbols and zero shadowed ones. JavaCPP bakes the package name into the
+  generated JNI sources at build time, so Oracle's platform jars were **rebuilt** from relocated
+  sources (their `META-INF/maven/com.oracle.svm.shadowed.org.bytedeco/javacpp/pom.xml` says as
+  much), and no amount of zip-entry renaming reproduces them. There is nothing to download either:
+  every `*-windows-x86_64.jar` name under
+  `https://lafo.ssw.uni-linz.ac.at/pub/graal-external-deps/native-image/` is a 404, and Maven
+  Central has no `com.oracle.svm.shadowed.org.bytedeco` group at all - which is the real reason
+  GR-34811 excludes Windows. Two ways out, both bigger than one task and both a controller
+  decision: (a) build the natives, i.e. run JavaCPP's `Builder` on the already-shadowed classes
+  from `javacpp-shadowed-1.5.7.jar` and `llvm-shadowed-13.0.1-1.5.7.jar` on a Windows runner -
+  `jnijavacpp.dll` is self-contained and cheap, `jniLLVM.dll` needs LLVM 13.0.1 headers and static
+  libs for MSVC, which the presets normally build from source; or (b) drop the shadowing on this
+  branch, point all platforms at the stock `org.bytedeco` jars from Maven Central and rename the
+  package in the 11 graal files that mention it plus suite.py and `SVM_LLVM`'s `moduleInfo` -
+  cheap and mechanical, but it diverges from upstream everywhere.
+
+- 2026-09-17 (the user's tip): GitHub Actions runners can be reached over **ssh for interactive
+  debugging** (a tmate/upterm-style step), which beats a full workflow round trip per attempt when
+  the same 10-minute Windows job is being poked at repeatedly. `graalvm-dev.yml` now has an opt-in
+  `debug_ssh` input (default off) that runs `mxschmitt/action-tmate@v3.24` after `dev-run`,
+  whether or not it failed, with `limit-access-to-actor: true` - this repository is public and the
+  connection string lands in the log, so the dispatching account needs a public key at
+  https://github.com/settings/keys for the session to be usable.
 
 ## Decisions
 
