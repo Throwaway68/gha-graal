@@ -28,6 +28,8 @@ and `manifest.json`.
 ## Building your own branches
 
 1. Push a branch to `Throwaway68/graal` (any base). Run `graalvm.yml` with `graal_ref=<branch>`.
+   Forks do not carry upstream tags: to build an upstream tag, push it to the fork first
+   (`git push <fork> refs/tags/<tag>:refs/tags/<tag>`); `graal-25.3.4.1` is already pushed.
 2. To change LLVM, push a branch to `Throwaway68/llvm-project`, run `llvm.yml` with
    `llvm_ref=<branch>` and a new `version`, then pass that `llvm_release` to `graalvm.yml`.
 3. The Native Image LLVM backend is registered by `substratevm/mx.substratevm/mx_substratevm.py`
