@@ -28,6 +28,20 @@ Builds any graal ref against the LLVM release: graal's downloads from
 `graalvm-<label>` with a `.tar.gz` per Unix platform, a `.zip` for Windows,
 and `manifest.json`.
 
+**GraalVM dev** (`graalvm-dev.yml`): `gh workflow run graalvm-dev.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.2 -f platform=windows-amd64 -f program=hello`.
+The iteration loop for the Windows backend port: one platform, no release. Builds the lean
+`mx-env/ce-llvm-dev` GraalVM (compiler, SubstrateVM, native-image driver, LLVM backend tool,
+LLVM.org toolchain; only `native-image` is built as a native launcher), then builds
+`tests/programs/<program>` with `native-image --tool:llvm-backend` via
+`scripts/graalvm/dev-run.sh` (extra arguments with `-f ni_args=...`) and uploads the
+native-image work directory as artifact `dev-<platform>-<program>`. mx's downloads are cached
+per platform and `mxbuild` per platform + JDK + graal commit, both saved right after the build
+so a job that fails at `dev-run` still caches its GraalVM: re-running the same graal commit
+(another program, other `ni_args`) rebuilds nothing and takes about five minutes instead of
+twelve. Because mx decides what to rebuild from file timestamps, and a checkout, a JDK download
+and NTFS all hand it fresh ones, the workflow backdates the inputs and puts the restored
+`mxbuild` an hour ahead - the comments in the workflow explain each case.
+
 **Shadowed jars** (`jars.yml`): `gh workflow run jars.yml -f version=1.5.7-graal.1`.
 Rebuilds the JavaCPP 1.5.7 and LLVM 13.0.1-1.5.7 **windows-x86_64** platform jars from
 Maven Central as graal-style *shadowed* jars (`org.bytedeco` relocated to
