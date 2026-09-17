@@ -33,7 +33,7 @@ on:
         default: ''
         type: string
       debug_ssh:
-        description: 'Open an interactive ssh/tmate session on the runner after dev-run'
+        description: 'Open an interactive ssh/tmate session on the runner after dev-run (linux-amd64 and darwin-aarch64 ONLY - ignored on windows-amd64, see the comment at the step)'
         default: false
         type: boolean
 
@@ -189,28 +189,39 @@ jobs:
       # caller. In detached mode the action returns it as a step output, the next steps write it
       # into the artifact `tmate-<platform>` - artifacts are downloadable as soon as they are
       # uploaded - and the job then waits on a file that the session deletes when it is done.
+      #
+      # NOT ON WINDOWS. `mxschmitt/action-tmate@v3.24` in detached mode never returns on
+      # windows-2022: run 35262580562 sat in this step for 57 minutes without reaching the next
+      # one and had to be cancelled. The whole block is therefore skipped there, and a warning
+      # says so, so that `debug_ssh: true` on windows-amd64 cannot burn the 240-minute job
+      # timeout. Every step below also carries its own `timeout-minutes` as a second line of
+      # defence. To debug a Windows runner interactively, start tmate by hand from MSYS2 in a
+      # `run:` step instead of using the action.
       - name: Debug over ssh (tmate)
         id: tmate
-        if: ${{ !cancelled() && inputs.debug_ssh }}
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
+        timeout-minutes: 45
         uses: mxschmitt/action-tmate@v3.24
         with:
           limit-access-to-actor: true
           connect-timeout-seconds: 300
           detached: true
       - name: Publish the ssh address
-        if: ${{ !cancelled() && inputs.debug_ssh }}
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
+        timeout-minutes: 5
         shell: bash
         run: |
           mkdir -p tmate
           printf '%s\n%s\n' '${{ steps.tmate.outputs.ssh-command }}' '${{ steps.tmate.outputs.web-url }}' | tee tmate/address.txt
       - name: Upload the ssh address
-        if: ${{ !cancelled() && inputs.debug_ssh }}
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
+        timeout-minutes: 10
         uses: actions/upload-artifact@v7.0.1
         with:
           name: tmate-${{ inputs.platform }}
           path: tmate/address.txt
       - name: Hold the runner for the ssh session
-        if: ${{ !cancelled() && inputs.debug_ssh }}
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
         timeout-minutes: 180
         shell: bash
         run: |
@@ -219,6 +230,12 @@ jobs:
           echo "holding the runner; in the ssh session run: rm '$hold'"
           while [ -f "$hold" ]; do sleep 15; done
           echo "hold released"
+      - name: Say why there is no ssh session on Windows
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os == 'Windows' }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          echo "::warning::debug_ssh is ignored on windows-amd64: mxschmitt/action-tmate's detached mode never returns on windows-2022 (run 35262580562 sat in it for 57 minutes). Start tmate by hand from MSYS2 if you need a session on this runner."
       - name: Upload work directory
         uses: actions/upload-artifact@v7.0.1
         if: always()

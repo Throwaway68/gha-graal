@@ -461,12 +461,15 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   Command: llc -relocation-model=pic --trap-unreachable -march=aarch64 --frame-pointer=all --aarch64-frame-record-on-top -O2 -filetype=obj -o b1.o b1o.bc
   ```
 
-  `--aarch64-frame-record-on-top` is a GraalVM patch to LLVM and
+  ~~`--aarch64-frame-record-on-top` is a GraalVM patch to LLVM and
   `Throwaway68/llvm-project@graal/22.1.8` does not carry it (`frame-record-on-top` appears zero
   times in `llvm/lib/Target/AArch64/AArch64FrameLowering.cpp` on both of its branches). It is an
   aarch64-only flag - amd64 passes `-march=x86-64` and nothing like it - so it does not touch the
   Windows port and was not investigated further. Anyone who wants darwin-aarch64 or linux-aarch64
-  green needs that patch in the LLVM release first.
+  green needs that patch in the LLVM release first.~~ **Superseded - the second sentence is wrong;
+  see the correction dated 2026-09-17 (task 8 review) below.** What still holds: the flag is
+  aarch64-only, amd64 passes `-march=x86-64` and nothing like it, so none of this touches the
+  Windows port.
 
 - 2026-09-17 (the user's tip): GitHub Actions runners can be reached over **ssh for interactive
   debugging** (a tmate/upterm-style step), which beats a full workflow round trip per attempt when
@@ -695,6 +698,41 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   same tag aborts the job instead of being touched. On run 35282186301 all seven assets went up on
   the first attempt in 2m06s total, which suggests the 500s came from `gh`'s five-way concurrent
   upload rather than from size alone - one at a time is both slower and reliable.
+
+- 2026-09-17 (task 8 review, correction to the darwin-aarch64 finding above): **the LLVM fork does
+  carry `--aarch64-frame-record-on-top`, so that is not why `llc` rejects the aarch64 batches.**
+  The earlier check grepped `llvm/lib/Target/AArch64/AArch64FrameLowering.cpp`, which is the wrong
+  file. The option is defined in `llvm/lib/Target/AArch64/AArch64RegisterInfo.cpp`:
+
+  ```
+  static cl::opt<bool>
+      FrameRecordOnTop("aarch64-frame-record-on-top",
+                       cl::desc("place the frame record on top of the frame"),
+                       cl::init(false), cl::Hidden);
+  ```
+
+  It comes from GraalVM patch commit `59be06d2` ("Introduce option to force placement of the frame
+  record on top of the stack frame"), which touches that one file, and it is present on **both**
+  `Throwaway68/llvm-project@graal/22.1.8` and `@graal/22.1.8-win` (the fork has three branches now:
+  those two and `main`; the superseded entry's "both of its branches" predates `graal/22.1.8-win`).
+
+  So the `LLVM compilation failed for batch 1` above needs a different explanation, and it is
+  **open for round 2** - it was not investigated here. The flag being aarch64-only still means none
+  of this can affect windows-amd64 or linux-amd64, and `llvm-22.1.8-graal.2` and `graal.3` are
+  unaffected as far as the amd64 targets are concerned.
+
+- 2026-09-17 (task 8 review, run https://github.com/Throwaway68/gha-graal/actions/runs/35262580562):
+  **`debug_ssh` is linux/macOS only, and the workflow now enforces that.** `mxschmitt/action-tmate@v3.24`
+  in `detached: true` mode never returns on windows-2022: that run sat in the tmate step for 57
+  minutes without reaching the publishing step and had to be cancelled. Attached mode is no use
+  either, because a job's log is not readable through the API while the job runs, so the connection
+  string never reaches the caller (run 35260481484). The whole ssh block in `graalvm-dev.yml` is
+  therefore skipped when `runner.os == 'Windows'`, with a `::warning::` saying why, and every step
+  in it carries its own `timeout-minutes` again (45 for tmate, which had been lost when `detached`
+  was added, 5/10 for the publishing steps, 180 for the hold) so that `debug_ssh: true` can never
+  burn the job's 240-minute budget. Debugging a Windows runner interactively means starting tmate
+  by hand from MSYS2 in a `run:` step; nobody has done that yet. This supersedes the "runs after
+  `dev-run`" wording of the entry above for windows-amd64.
 
 ## Decisions
 
