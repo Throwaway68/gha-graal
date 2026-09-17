@@ -15,3 +15,8 @@ tests/test_package_llvm.sh
 tests/test_package_graalvm.sh
 docs/superpowers/specs/2026-09-17-windows-llvm-backend-design.md
 docs/superpowers/plans/2026-09-17-windows-llvm-backend-round1.md
+docs/journal/windows-llvm-backend.md
+tests/programs/hello/Hello.java
+tests/programs/hello/expected.txt
+scripts/graalvm/dev-run.sh
+tests/test_dev_run.sh
