@@ -228,22 +228,30 @@ jobs:
           t0 = time.time()
           roots = [os.path.join('graal', d, 'mxbuild') for d in os.listdir('graal')]
           roots = [r for r in roots if os.path.isdir(r)] + [r for r in ['mx/mxbuild'] if os.path.isdir(r)]
-          n = 0
+          def touch(p):
+              try:
+                  os.utime(p, (stamp, stamp))
+                  return 1
+              except OSError:
+                  return 0
+          n, ninja = 0, 0
           for root in roots:
               for dirpath, dirnames, filenames in os.walk(root):
+                  # A ninja build directory is left alone except for build.ninja: ninja's deps log
+                  # remembers the mtime each object had when its header dependencies were
+                  # recorded, and an object that is suddenly newer means "stored deps info out of
+                  # date for 'src/launcher.obj'" and a rebuild (run 35227444918). build.ninja
+                  # itself has to move, so that it outranks the source directories that NTFS
+                  # bumps to the current time.
+                  if 'build.ninja' in filenames:
+                      dirnames[:] = []
+                      ninja += touch(os.path.join(dirpath, 'build.ninja'))
+                      continue
                   for name in dirnames + filenames:
-                      try:
-                          os.utime(os.path.join(dirpath, name), (stamp, stamp))
-                          n += 1
-                      except OSError:
-                          pass
-              try:
-                  os.utime(root, (stamp, stamp))
-                  n += 1
-              except OSError:
-                  pass
-          print(f'stamped {n} restored build outputs in {", ".join(roots)} one hour ahead '
-                f'in {time.time() - t0:.0f}s')
+                      n += touch(os.path.join(dirpath, name))
+              n += touch(root)
+          print(f'stamped {n} restored build outputs (and {ninja} build.ninja, keeping their '
+                f'objects) in {", ".join(roots)} one hour ahead in {time.time() - t0:.0f}s')
           EOF
       - name: Build (Linux/macOS)
         id: build_unix
