@@ -21,6 +21,11 @@ on:
         description: 'Create the GitHub release'
         default: true
         type: boolean
+      platforms:
+        description: 'Comma-separated subset of linux-amd64,darwin-aarch64,windows-amd64 to build'
+        default: 'linux-amd64,darwin-aarch64,windows-amd64'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,17 +38,30 @@ env:
   NATIVE_IMAGE_EXPERIMENTAL_OPTIONS_ARE_FATAL: 'true'
 
 jobs:
+  plan:
+    name: Select platforms
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - id: select
+        shell: bash
+        run: |
+          all='[{"os":"ubuntu-22.04","platform":"linux-amd64"},{"os":"macos-14","platform":"darwin-aarch64"},{"os":"windows-2022","platform":"windows-amd64"}]'
+          sel=$(jq -c --arg p ',${{ inputs.platforms }},' '[.[] | select(.platform as $x | $p | contains("," + $x + ","))]' <<<"$all")
+          echo "matrix=$sel" >> "$GITHUB_OUTPUT"
+          echo "building: $sel"
+          [ "$sel" != "[]" ] || { echo "no platform selected" >&2; exit 1; }
+
   build:
     name: ${{ matrix.platform }}
+    needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-22.04, platform: linux-amd64 }
-          - { os: macos-14, platform: darwin-aarch64 }
-          - { os: windows-2022, platform: windows-amd64 }
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout gha-graal
         uses: actions/checkout@v7.0.1

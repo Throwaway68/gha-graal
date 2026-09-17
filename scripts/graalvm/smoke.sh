@@ -30,8 +30,9 @@ echo "== lli --version";           "$LLI" --version
 
 echo "== Sulong: compile C with the bundled toolchain and run it"
 TC=$("$LLI" --print-toolchain-path | tr -d '\r')
-echo "toolchain: $TC"; ls "$TC/bin"
-CLANG=$(exe "$TC/bin" clang)
+# --print-toolchain-path already points at the toolchain bin directory
+echo "toolchain: $TC"; ls "$TC"
+CLANG=$(exe "$TC" clang)
 cat > hello.c <<'EOC'
 #include <stdio.h>
 int main(void) { printf("Hello from Sulong\n"); return 0; }
