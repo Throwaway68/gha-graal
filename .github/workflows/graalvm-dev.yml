@@ -169,22 +169,43 @@ jobs:
           # makes the recorded jimage config match on the next run.
           import os
           stamp = 946684800  # 2000-01-01T00:00:00Z, older than any build output
-          paths = []
+          files, dirs = [], []
           for root in ('graal', 'mx', 'jdk-dl', 'jdk'):
               if not os.path.isdir(root):
                   continue
-              paths.append(root)
+              dirs.append(root)
               for dirpath, dirnames, filenames in os.walk(root):
                   dirnames[:] = [d for d in dirnames if d not in ('.git', 'mxbuild')]
-                  paths += [os.path.join(dirpath, n) for n in dirnames + filenames]
-          n = 0
-          for p in reversed(paths):  # deepest first: stamping an entry never re-touches its parent
+                  dirs += [os.path.join(dirpath, d) for d in dirnames]
+                  files += [os.path.join(dirpath, f) for f in filenames]
+          def touch(p):
               try:
                   os.utime(p, (stamp, stamp))
-                  n += 1
+                  return True
               except OSError:
-                  pass
-          print(f'backdated {n} of {len(paths)} entries to 2000-01-01')
+                  return False
+          def stale(p):
+              try:
+                  return int(os.stat(p).st_mtime) != stamp
+              except OSError:
+                  return False
+          n = sum(touch(p) for p in files)
+          # Directories after the files and deepest first, then re-stamped until they stay put:
+          # NTFS duplicates a file's timestamps into its parent's index entry and bumps the
+          # parent's mtime when it flushes that, which silently undid the first pass
+          # (run 35223782654 still saw "ninja explain: output build.ninja older than most recent
+          # input .../include", with the include directory carrying the time of this step).
+          dirs.reverse()
+          left, passes = dirs, 0
+          while left and passes < 5:
+              passes += 1
+              for d in left:
+                  touch(d)
+              left = [d for d in left if stale(d)]
+          print(f'backdated {n}/{len(files)} files and {len(dirs) - len(left)}/{len(dirs)} '
+                f'directories to 2000-01-01 in {passes} pass(es)')
+          if left:
+              print(f'WARNING: {len(left)} directories kept a newer mtime, e.g. {left[:3]}')
           EOF
       - name: Build (Linux/macOS)
         id: build_unix
