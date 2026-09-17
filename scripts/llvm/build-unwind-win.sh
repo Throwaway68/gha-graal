@@ -12,6 +12,9 @@
 # against kernel32.lib, ntdll.lib, ucrt.lib (/MD) or legacy_stdio_definitions.lib
 # (the last one for fprintf, which the UCRT headers define inline).
 #
+# <out-dir> is a toolchain bundle root on the release path, so the script puts nothing else
+# there: the symbol lists it checks are written into the build directory.
+#
 # Environment: MSYS2_ROOT (default C:/msys64), BUILD_DIR (default build-unwind).
 set -euo pipefail
 
@@ -30,6 +33,14 @@ BUILD=${BUILD_DIR:-build-unwind}
 MSYS=${MSYS2_ROOT:-C:/msys64}
 SYSROOT=$MSYS/ucrt64
 TRIPLE=x86_64-w64-windows-gnu
+
+root_files() {  # regular files directly under a directory (not its subdirectories)
+  [ -d "$1" ] || return 0
+  # the trailing `true` matters: a failing [ -f ] as the loop's last command would,
+  # with `set -o pipefail`, make the whole function fail.
+  ( cd "$1" || exit 0; for f in * .[!.]*; do [ -f "$f" ] && printf '%s\n' "$f"; done; true ) | LC_ALL=C sort
+}
+ROOT_BEFORE=$(root_files "$OUT")
 
 [ -d "$SRC/runtimes" ] || { echo "no runtimes/ under $SRC" >&2; exit 1; }
 [ -d "$SRC/libunwind" ] || { echo "no libunwind/ under $SRC" >&2; exit 1; }
@@ -104,22 +115,33 @@ ls -l "$OUT/include"
 
 NM="$CLANG/bin/llvm-nm.exe"
 export LC_ALL=C
-"$NM" --defined-only "$LIB" | awk 'NF>=3 && $2 ~ /^[A-Za-z]$/ {print $3}' | sort -u > "$OUT/libunwind-defined.txt"
+DIAG=$BUILD   # the symbol lists are build output, not part of the bundle
+mkdir -p "$DIAG"
+"$NM" --defined-only "$LIB" | awk 'NF>=3 && $2 ~ /^[A-Za-z]$/ {print $3}' | sort -u > "$DIAG/libunwind-defined.txt"
 
 echo "== defined symbols of interest"
 missing=
 for s in _Unwind_RaiseException _Unwind_Resume _Unwind_DeleteException _Unwind_Backtrace \
          _GCC_specific_handler _Unwind_GetLanguageSpecificData _Unwind_GetRegionStart \
          _Unwind_GetIP _Unwind_GetIPInfo _Unwind_SetIP _Unwind_GetGR _Unwind_SetGR; do
-  if grep -qx "$s" "$OUT/libunwind-defined.txt"; then echo "  ok      $s"; else echo "  MISSING $s"; missing="$missing $s"; fi
+  if grep -qx "$s" "$DIAG/libunwind-defined.txt"; then echo "  ok      $s"; else echo "  MISSING $s"; missing="$missing $s"; fi
 done
 [ -z "$missing" ] || { echo "libunwind.a lacks:$missing" >&2; exit 1; }
 
 echo "== undefined symbols (archive-internal ones filtered out; the rest must come from ucrt/kernel32/ntdll)"
-"$NM" --undefined-only "$LIB" | awk '$1=="U"||$1=="w"{print $2}' | sort -u > "$OUT/libunwind-undefined-raw.txt"
-comm -23 "$OUT/libunwind-undefined-raw.txt" "$OUT/libunwind-defined.txt" | tee "$OUT/libunwind-undefined.txt"
-if grep -Eq '^_*(_chkstk_ms|mingw_|gcc_personality|libgcc)' "$OUT/libunwind-undefined.txt"; then
+"$NM" --undefined-only "$LIB" | awk '$1=="U"||$1=="w"{print $2}' | sort -u > "$DIAG/libunwind-undefined-raw.txt"
+comm -23 "$DIAG/libunwind-undefined-raw.txt" "$DIAG/libunwind-defined.txt" | tee "$DIAG/libunwind-undefined.txt"
+if grep -Eq '^_*(_chkstk_ms|mingw_|gcc_personality|libgcc)' "$DIAG/libunwind-undefined.txt"; then
   echo "libunwind.a references mingw/libgcc runtime symbols that the MSVC link cannot resolve" >&2
   exit 1
 fi
+# The out dir is a toolchain bundle root (build.sh passes the LLVM install prefix): anything
+# this script drops next to bin/ lib/ include/ would be published inside the release tarball.
+NEW_ROOT_FILES=$(comm -13 <(printf '%s\n' "$ROOT_BEFORE") <(root_files "$OUT"))
+if [ -n "$NEW_ROOT_FILES" ]; then
+  echo "build-unwind-win.sh left loose files at the root of $OUT:" >&2
+  printf '  %s\n' $NEW_ROOT_FILES >&2
+  exit 1
+fi
+
 echo "== libunwind.a: $LIB"
