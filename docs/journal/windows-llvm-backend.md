@@ -10,10 +10,12 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   https://github.com/Throwaway68/gha-graal/actions/runs/35207963198, re-run green after the review fixes
   (hard step-1 assertions, strict COFF rewriter):
   https://github.com/Throwaway68/gha-graal/actions/runs/35209025076
-- 2026-09-17: LLVM release `llvm-22.1.8-graal.2` with Windows libunwind, all three platforms green on the
-  first try (run https://github.com/Throwaway68/gha-graal/actions/runs/35209720023). Seven assets as in
-  graal.1; `llvm-22.1.8-graal.2-windows-amd64.tar.gz` carries `lib/x86_64-w64-windows-gnu/libunwind.a`,
-  the same archive as `unwind.lib`, and `include/unwind.h`. This is the release tasks 5 to 9 consume.
+- 2026-09-17: LLVM release `llvm-22.1.8-graal.2` with Windows libunwind, all three platforms green
+  (run https://github.com/Throwaway68/gha-graal/actions/runs/35212270484; the tag was rebuilt from
+  run 35209720023 after the review fix below). Seven assets as in graal.1;
+  `llvm-22.1.8-graal.2-windows-amd64.tar.gz` carries `lib/x86_64-w64-windows-gnu/libunwind.a`, the same
+  archive as `unwind.lib`, and `include/unwind.h`, and nothing loose at its root. This is the release
+  tasks 5 to 9 consume.
 
 ## Findings
 
@@ -96,9 +98,15 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   the 16-minute Windows job (warm sccache): MSYS2 at `C:\msys64` runs its first-time setup by itself, pacman pulls
   the UCRT headers, 11 ninja targets build, and `coff-assoc-comdats.py` makes 88 COMDAT sections in 9 objects
   associative. The undefined-symbol set is identical to the spike's (`__imp_Rtl*`, `__imp_RaiseException`,
-  `__imp___acrt_iob_func`, `abort`, `fflush`, `fprintf`, `memcpy`). Cosmetic: the script's three diagnostic
-  symbol lists (`libunwind-defined.txt`, `libunwind-undefined{,-raw}.txt`) land next to `bin/`, `lib/`, `include/`
-  at the bundle root; harmless, and worth moving to the build dir if a later release wants a clean root.
+  `__imp___acrt_iob_func`, `abort`, `fflush`, `fprintf`, `memcpy`).
+- 2026-09-17 (review fix, runs 35209720023 → https://github.com/Throwaway68/gha-graal/actions/runs/35212270484):
+  **an out dir that is an install prefix is a published bundle root.** The first graal.2 build shipped
+  `build-unwind-win.sh`'s three diagnostic symbol lists (`libunwind-defined.txt`,
+  `libunwind-undefined{,-raw}.txt`) at the root of `llvm-22.1.8-graal.2-windows-amd64.tar.gz`, and
+  `LLVM_TOOLCHAIN` copies that root into every Windows GraalVM. The script now writes them into the build
+  directory (still printed to the log, still uploaded by the spike workflow) and, as a regression guard,
+  snapshots the regular files at the out dir's root before installing and fails if it added any. The
+  republished bundle has 4080 entries and not one of them lives directly at the root.
 
 ## Decisions
 
