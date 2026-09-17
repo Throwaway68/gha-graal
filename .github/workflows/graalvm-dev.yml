@@ -3,8 +3,9 @@ name: GraalVM dev
 # Fast iteration loop for the Windows LLVM backend: build a lean GraalVM (compiler,
 # SubstrateVM, native-image driver, LLVM backend tool, LLVM.org toolchain) from a graal
 # ref, build one program under tests/programs with `--tool:llvm-backend`, upload the
-# native-image work directory. `mxbuild` and the LabsJDK download are cached per
-# platform + JDK + graal SHA, so a re-run of the same commit starts from the last build.
+# native-image work directory. mx's downloads are cached per platform and the build itself
+# per platform + JDK + graal SHA, so re-running the same graal commit (another program,
+# other ni_args, after a failure) reuses the GraalVM built by the previous run.
 
 on:
   workflow_dispatch:
@@ -146,33 +147,44 @@ jobs:
       - name: Install env file
         shell: bash
         run: cp ci/mx-env/ce-llvm-dev graal/vm/mx.vm/ce-llvm-dev
-      - name: Age the inputs to the restored build
-        if: steps.cache.outputs.cache-hit == 'true'
+      - name: Age the build inputs
         shell: bash
         run: |
           python3 - <<'EOF'
-          # mx rebuilds a project when an input is newer than its output. Every input outside
-          # mxbuild arrives fresh: actions/checkout stamps the graal and mx sources with the time
-          # of this run and mx re-downloads the LabsJDK ("Deleting stale ...jdk-dl..."), so
-          # without this even a fully restored mxbuild is rebuilt from scratch
-          # ("HostProxyException.class[11:38:28] is older than HostProxyException.java[11:49:01]"
-          # in run 35217642476). The build cache key carries the graal SHA and the JDK id, so on
-          # an exact hit these inputs are byte for byte the ones that produced the cache and the
-          # restored outputs really are up to date. Exact hits only - the build cache has no
-          # restore-keys fallback, so this can never hide a source change.
+          # mx rebuilds a target when an input is newer than its output, and every input outside
+          # mxbuild arrives fresh in a hosted run: actions/checkout stamps the graal and mx trees
+          # with the time of this run and mx re-downloads the LabsJDK ("Deleting stale
+          # ...jdk-dl..."). A restored mxbuild is then rebuilt from scratch - directly
+          # ("HostProxyException.class[11:38:28] is older than HostProxyException.java[11:49:01]",
+          # run 35217642476), through *directory* mtimes, which ninja and archive tasks compare
+          # too ("llvm-toolchain.tar[12:22:14] is older than graal\sdk\llvm-patches\backports" and
+          # "ninja explain: output build.ninja older than most recent input .../include", run
+          # 35221772232), and through the LabsJDK's lib/modules timestamp, which mx stores in the
+          # graalvm-jimage config ("the configuration changed").
+          #
+          # Giving all of them one fixed old timestamp fixes that, and unconditionally: without a
+          # restore-keys fallback the build cache is either an exact hit - then this checkout, mx
+          # and JDK are the ones that produced it, so the restored outputs really are up to date -
+          # or empty, and then nothing can be wrongly skipped. Doing it on cold runs too is what
+          # makes the recorded jimage config match on the next run.
           import os
-          stamp = 946684800  # 2000-01-01T00:00:00Z, older than any cached build output
-          n = 0
+          stamp = 946684800  # 2000-01-01T00:00:00Z, older than any build output
+          paths = []
           for root in ('graal', 'mx', 'jdk-dl', 'jdk'):
+              if not os.path.isdir(root):
+                  continue
+              paths.append(root)
               for dirpath, dirnames, filenames in os.walk(root):
                   dirnames[:] = [d for d in dirnames if d not in ('.git', 'mxbuild')]
-                  for name in filenames:
-                      try:
-                          os.utime(os.path.join(dirpath, name), (stamp, stamp))
-                          n += 1
-                      except OSError:
-                          pass
-          print(f'backdated {n} files to 2000-01-01')
+                  paths += [os.path.join(dirpath, n) for n in dirnames + filenames]
+          n = 0
+          for p in reversed(paths):  # deepest first: stamping an entry never re-touches its parent
+              try:
+                  os.utime(p, (stamp, stamp))
+                  n += 1
+              except OSError:
+                  pass
+          print(f'backdated {n} of {len(paths)} entries to 2000-01-01')
           EOF
       - name: Build (Linux/macOS)
         id: build_unix
