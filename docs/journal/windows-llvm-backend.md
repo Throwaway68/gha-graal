@@ -26,18 +26,38 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` / `LLVM_PLATFORM_SPECIFIC_SHADOWED` at them.
 
 - 2026-09-17: Dev loop ready, validated on the pristine tag `graal-25.3.4.1`
-  (`.github/workflows/graalvm-dev.yml` + `mx-env/ce-llvm-dev`, commit c6d8ea6): linux-amd64 green
-  with `DEV-RUN OK` (cold https://github.com/Throwaway68/gha-graal/actions/runs/35224918546, warm
-  https://github.com/Throwaway68/gha-graal/actions/runs/35230541334), windows-amd64 builds and
-  caches and fails only at `dev-run`
-  (cold https://github.com/Throwaway68/gha-graal/actions/runs/35224907245, warm
-  https://github.com/Throwaway68/gha-graal/actions/runs/35230528428). Tasks 6 to 8 iterate with
+  (`.github/workflows/graalvm-dev.yml` + `mx-env/ce-llvm-dev`, final shape in commit e93fe15):
+  linux-amd64 green with `DEV-RUN OK`
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35232601109, 7m50s), windows-amd64 builds
+  and fails only at `dev-run`
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35232589440, download cache miss, 9m02s;
+  https://github.com/Throwaway68/gha-graal/actions/runs/35233656718, hit, 9m43s). Tasks 6 to 8
+  iterate with
   `gh workflow run graalvm-dev.yml -R Throwaway68/gha-graal -f graal_ref=<ref>
   -f llvm_release=llvm-22.1.8-graal.2 -f platform=<p> -f program=<dir> -f ni_args='<args>'`; the
   `dev-<platform>-<program>` artifact carries `work/stdout.txt`, `work/stderr.txt`, the
   native-image reports and the LLVM objects of the run.
 
 ## Findings
+
+- 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
+  https://github.com/Throwaway68/gha-graal/actions/runs/35233656718 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35232601109): **the workflow after the
+  ruling - one download cache, no build cache - measured on `graal-25.3.4.1`.**
+
+  | run | platform | mx download cache | build | dev-run | total |
+  |-----|----------|-------------------|-------|---------|-------|
+  | 35232589440 | windows-amd64 | miss, saved in 46 s | 7m12s | fails at `--tool:llvm-backend` | 9m02s |
+  | 35233656718 | windows-amd64 | hit (1236 MB, restored in 15 s), not saved again | 8m05s | same failure | 9m43s |
+  | 35232601109 | linux-amd64 | miss, saved in 15 s | 5m42s | `DEV-RUN OK` | 7m50s |
+
+  The cache does what it is there for: `Downloading LLVM_ORG [duration: 49.14]` and 64 download
+  lines on the miss become `[duration: 0.0008]` and 32 lines on the hit, about 60 to 70 s of the
+  build step. It does not show in the totals because a windows-2022 build of this GraalVM varies by
+  ±2 min between runners (5m50s to 8m14s measured for identical input), which is worth remembering
+  when reading any single Windows timing in this journal. The key is per platform because
+  `hashFiles` sees different `suite.py` content on Windows (line endings), which is harmless.
+
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35224907245 and
   https://github.com/Throwaway68/gha-graal/actions/runs/35224918546): **the pristine tag's Windows
@@ -65,64 +85,42 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `native-image` native, both agent libraries skipped. No component dependency had to be added.
 
 - 2026-09-17 (runs 35216649197, 35217642476, 35219010453, 35221772232, 35226210569, 35227444918,
-  35229643502, 35230528428): **a GitHub cache of `mxbuild` is worthless until every build input is
-  given a stable timestamp.** mx rebuilds a target when an input is newer than its output
-  (`JavaBuildTask._compute_build_reason`, `TimeStampFile.isOlderThan`), and a hosted run hands it
-  fresh inputs in five different ways. Each one alone rebuilds the whole GraalVM:
-  1. `actions/checkout` stamps every source with the time of the run, while the cache restores
+  35229643502, 35230528428): **`graalvm-dev.yml` caches mx's downloads and nothing else; a cache of
+  the build outputs does not pay for this loop.** mx rebuilds a target when an input is newer than
+  its output (`JavaBuildTask._compute_build_reason`, `TimeStampFile.isOlderThan`), and a hosted run
+  hands it fresh inputs in five independent ways, each of which by itself rebuilds the whole
+  GraalVM out of a fully populated `mxbuild`:
+  1. `actions/checkout` stamps every source with the time of the run while the cache restores
      `mxbuild` with the mtimes of the run that built it: `HostProxyException.class[11:38:28] is
-     older than HostProxyException.java[11:49:01]`. The first cached Windows run was therefore
-     *slower* than the cold one (build 7m18s vs 6m00s, plus ~2 min to restore 5 GB).
-  2. mx re-downloads its dependencies into `~/.mx/cache`, and a fresh download is newer than every
+     older than HostProxyException.java[11:49:01]`.
+  2. mx re-downloads its dependencies into `~/.mx/cache`, and a fresh download outranks every
      output: `dependency LLVM_ORG updated` re-archives the 1.5 GB LLVM toolchain (106 s) and both
      GraalVM layouts, `dependency ANTLR4/XZ/JSON/ICU4J updated` re-shades the jars and recompiles
      the Truffle processors and everything behind them.
   3. mx deletes and re-downloads the LabsJDK (`Deleting stale ...jdk-dl...`) and records the
      timestamp of its `lib/modules` in the graalvm-jimage config, so `the configuration changed`
-     rebuilds the jimage and with it both layouts and `native-image.exe`.
-  4. directories count as inputs: `llvm-toolchain.tar[12:22:14] is older than
-     graal\sdk\llvm-patches\backports`, and ninja's generator rule watches the `include`
-     directories of every native project. **On NTFS a directory cannot be kept old**: the file
-     timestamps are duplicated into the parent's index entry and flushed asynchronously, so a
-     directory that verified as 2000-01-01 at 13:21:16.8 read as 13:21:18.4 to ninja a moment
-     later. The fix is to stamp the restored outputs one hour into the *future* instead.
-  5. ninja's deps log stores the mtime each object had when its headers were recorded, so
-     freshening the objects means `stored deps info out of date for 'src/launcher.obj'`. Inside a
-     ninja build directory only `build.ninja` may move, and the sources mx generates for it
-     (`gensrc/JvmFuncsFallbacks.c`, `jni_gen/*.h`) have to stay behind with the objects - but only
-     those: skipping every header made `com.oracle.svm.core` recompile over its own
-     `bin/.../sharedGCStructs.h`.
-  With all five handled (backdate the graal and mx checkouts and the LabsJDK to 2000-01-01, put
-  the restored `mxbuild` an hour ahead except for ninja's objects and generated sources), a
-  re-run of the same graal commit builds nothing:
-
-  | run | platform | build cache | restore | build | total |
-  |-----|----------|-------------|---------|-------|-------|
-  | 35224907245 | windows-amd64 | miss (save 3m25s) | - | 7m32s | 12m26s |
-  | 35230528428 | windows-amd64 | exact hit | 2m38s | **0m21s** (6 mx tasks) | 5m22s |
-  | 35224918546 | linux-amd64 | miss (save 1m42s) | - | 5m38s | 9m35s |
-  | 35230541334 | linux-amd64 | exact hit | 1m49s | **0m36s** | 4m33s |
-
-  `dev-run` itself is 45 to 65 s on linux-amd64. The build cache is ~4.9 GB per platform and the
-  mx download cache ~1.2 to 1.5 GB, i.e. both platforms together already exceed the repository's
-  10 GB Actions cache quota, so they evict each other and the `llvm.yml` sccache entries; if that
-  matters, `gh cache delete` the platform that is not being worked on.
-
-- 2026-09-17 (same runs): **a cache from a *different* graal commit is worth nothing**, for the
-  reason above (every source has the time of the run, so mx rebuilds everything anyway) - it only
-  costs the ~2 min it takes to restore 5 GB. The build cache therefore has no `restore-keys`
-  fallback, and the ageing step is unconditional: the cache is either an exact hit, where the
-  checkout, mx and JDK are the ones that produced it, or empty, where nothing can be wrongly
-  skipped. mx's downloads are the opposite - they do not depend on the commit - so that cache does
-  fall back by platform and speeds up cold runs too. The consequence for tasks 6 to 8: a new graal
-  commit always pays the full build (~7.5 min on Windows, ~5.5 min on Linux); re-running that same
-  commit with other `ni_args` or another program is ~5 min end to end.
-
-- 2026-09-17 (note, no run): the eight cache iterations above each cost a 5 to 13 minute round
-  trip. For that kind of poking about a hosted runner an interactive session (an ssh/tmate step in
-  a scratch workflow, or `debug_ssh` added to this one) is the better tool: the windows-2022
-  filesystem behaviour that drove most of it - NTFS bumping directory mtimes a second later - is
-  one command to observe live and invisible from a log.
+     rebuilds the jimage, both layouts and `native-image.exe`.
+  4. Directories count as inputs (`llvm-toolchain.tar[12:22:14] is older than
+     graal\sdk\llvm-patches\backports`; ninja's generator rule watches each native project's
+     `include`), and **on NTFS a directory cannot be kept old**: file timestamps are duplicated
+     into the parent's index entry and flushed asynchronously, so a directory that verified as
+     2000-01-01 at 13:21:16.8 read as 13:21:18.4 to ninja 1.6 s later.
+  5. ninja's deps log stores the mtime each object had when its headers were recorded, so making
+     the objects newer means `stored deps info out of date for 'src/launcher.obj'`.
+  All five can be beaten - backdate the checkouts and the JDK, put the restored `mxbuild` an hour
+  ahead except for ninja's objects and the sources mx generates for them - and the payoff is real
+  when the *same* graal commit is rebuilt: windows-amd64 7m32s -> 0m21s of build (total 12m26s ->
+  5m22s, restoring 5 GB costs 2m38s), linux-amd64 5m38s -> 0m36s (9m35s -> 4m33s). But that is the
+  wrong case for this loop: tasks 6 to 8 push a new graal commit per iteration, and a cache from a
+  *different* commit reuses nothing at all (every source has the time of the run), so it only adds
+  ~2 min to restore and ~3.5 min to save on Windows - the first cached Windows run was slower than
+  the cold one, 7m18s vs 6m00s of build. Worse, the key named only platform + JDK + graal SHA: the
+  same graal commit rebuilt against a **new `llvm_release`** would have restored the old toolchain,
+  and the future-stamping would have kept it. Hence the ruling below. What remains is the download
+  cache, ~1.2 to 1.5 GB per platform, keyed by platform + `llvm_release` + a hash of
+  `common.json` and the `suite.py` files, which is what actually decides those downloads, with one
+  fallback so that editing suite.py (task 6) does not re-download everything. `jdk-dl` is not
+  cached: mx deletes and re-downloads the LabsJDK anyway (9 to 20 s).
 
 - 2026-09-17 (measurement): `mx build` in `vm/` also compiles the Truffle, compiler and NFI
   *test* projects (`com.oracle.truffle.api.bytecode.test` alone is 40 to 60 s on Windows) and the
@@ -242,6 +240,14 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   descriptor needs both on javac's module path, since the llvm module requires javacpp.
 
 ## Decisions
+
+- 2026-09-17 (controller ruling, task 5 review): the dev workflow caches **only** mx's downloads.
+  No cache of build outputs, and no timestamp manipulation of the checkout, the JDK or `mxbuild`:
+  the reuse it bought applied to the one case tasks 6 to 8 do not have (the same graal commit
+  twice), it cost ~3.5 min of save time per Windows run, and a key without `llvm_release` could
+  serve a stale LLVM toolchain. A cold lean build - ~7.5 min on windows-amd64, ~5.5 min on
+  linux-amd64, under 13 min end to end - is what the loop is built on. Evidence in the findings
+  above.
 
 - 2026-09-17: Exception handling via libunwind SEH mode + IR shim (spec section 2). Fallback: own SEH
   unwinder, triggered by the reviewer after two failed review cycles on Task 8.
