@@ -5,11 +5,12 @@
 #
 # The library is compiled for x86_64-w64-windows-gnu (that target predefines __SEH__,
 # which selects Unwind-seh.cpp) against the mingw-w64 UCRT headers from MSYS2, and
-# installed as <out-dir>/lib/x86_64-w64-windows-gnu/libunwind.a plus a copy named
-# unwind.lib (link.exe rejects the .a extension) and <out-dir>/include/*.h.
+# installed as <out-dir>/lib/x86_64-w64-windows-gnu/libunwind.a, as a copy named
+# unwind.lib, and <out-dir>/include/*.h.
 # Native Image links it into MSVC-built images as a plain COFF archive: nothing of
-# the mingw CRT is used, only headers, so every undefined symbol must be resolvable
-# against the UCRT (ucrt.lib via /MD), kernel32 or ntdll.
+# the mingw CRT is used, only its headers, so every undefined symbol must resolve
+# against kernel32.lib, ntdll.lib, ucrt.lib (/MD) or legacy_stdio_definitions.lib
+# (the last one for fprintf, which the UCRT headers define inline).
 #
 # Environment: MSYS2_ROOT (default C:/msys64), BUILD_DIR (default build-unwind).
 set -euo pipefail
