@@ -2,7 +2,6 @@ OK throw-catch-deep
 OK implicit-exceptions
 OK rethrow-wrap
 OK finally-order
-OK stack-overflow
 OK gc-live-frames
 OK gc-weakref
 OK gc-pressure

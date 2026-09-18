@@ -12,6 +12,10 @@ import java.util.function.IntSupplier;
  * Round 2 program for the Windows LLVM backend: exceptions across frames, GC with live
  * references in compiled frames, threads. One "OK <check>" line per check; expected.txt
  * lists them all. A failing check prints "FAIL <check>" and the process exits 1.
+ *
+ * The StackOverflowError check lives in its own program, tests/programs/overflow, because the
+ * LLVM backend segfaults on it (see that program's comment): here it would hide the checks
+ * after it.
  */
 public class Stress {
     static final class Boom extends Exception {
@@ -103,26 +107,6 @@ public class Stress {
             order.append("catch");
         }
         check("f3,f2,f1,catch".contentEquals(order), "finally-order");
-    }
-
-    static int recurse(int n) {
-        return recurse(n + 1) + 1;
-    }
-
-    static void stackOverflow() {
-        boolean caught = false;
-        try {
-            sink = recurse(0);
-        } catch (StackOverflowError e) {
-            caught = true;
-        }
-        boolean after = false;
-        try {
-            deep(10);
-        } catch (Boom b) {
-            after = b.depth == 0;
-        }
-        check(caught && after, "stack-overflow");
     }
 
     // ---- GC ------------------------------------------------------------------------
@@ -339,7 +323,6 @@ public class Stress {
         implicitExceptions();
         rethrowWrap();
         finallyOrder();
-        stackOverflow();
         gcLiveFrames();
         gcWeakRef();
         gcPressure();
