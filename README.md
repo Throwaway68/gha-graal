@@ -114,18 +114,38 @@ and duration, the verdict, and the mx command that failed:
     Gate                        ok       0:22:43.110490
     GATE PASSED: ...
 
-Status of the tags under the backend (2026-09-18, round 3 task 1, graal `54969a2cee8`): `build`
-and `helloworld` are **green on linux-amd64 and windows-amd64** - windows
-[run 35363499659](https://github.com/Throwaway68/gha-graal/actions/runs/35363499659), gate step
-33m46s of which `image demos` 26m41s; linux
-[run 35363511118](https://github.com/Throwaway68/gha-graal/actions/runs/35363511118), 23m51s and
-18m49s. That tag builds and runs a native `javac`, four helloworld variants (one of them a shared
+**Status of the tags under the backend** (2026-09-18, round 3, graal `fb017323af7`). Every row was
+run on windows-amd64 first and on linux-amd64 as the reference; a failure that also happens on Linux
+is a property of the backend, not of Windows, and not one of this round's fixes was needed on Linux.
+
+| tag | windows-amd64 | linux-amd64 | result |
+|-----|---------------|-------------|--------|
+| `build`, `helloworld` | [35363499659](https://github.com/Throwaway68/gha-graal/actions/runs/35363499659) 33m46s | [35363511118](https://github.com/Throwaway68/gha-graal/actions/runs/35363511118) 23m51s | green (task 1, graal `54969a2cee8`) |
+| `native_unittests` | [35380311997](https://github.com/Throwaway68/gha-graal/actions/runs/35380311997) 32m40s | [35380363276](https://github.com/Throwaway68/gha-graal/actions/runs/35380363276) 21m54s | green, 225 / 252 tests |
+| `all_native_unittests --partial 1/2` | [35380348948](https://github.com/Throwaway68/gha-graal/actions/runs/35380348948) 55m43s | [35380400267](https://github.com/Throwaway68/gha-graal/actions/runs/35380400267) 55m30s | green |
+| `all_native_unittests --partial 2/2` | [35380356446](https://github.com/Throwaway68/gha-graal/actions/runs/35380356446) 55m00s | [35380407856](https://github.com/Throwaway68/gha-graal/actions/runs/35380407856) 51m45s | green |
+| `check_svm_invariants` | [35380319303](https://github.com/Throwaway68/gha-graal/actions/runs/35380319303) 4m29s | [35380370096](https://github.com/Throwaway68/gha-graal/actions/runs/35380370096) 4m14s | green |
+| `condconfig` | [35380326588](https://github.com/Throwaway68/gha-graal/actions/runs/35380326588) 10m08s | [35380377849](https://github.com/Throwaway68/gha-graal/actions/runs/35380377849) 7m48s | green |
+| `java_agent` | [35380333677](https://github.com/Throwaway68/gha-graal/actions/runs/35380333677) 15m24s | [35380385079](https://github.com/Throwaway68/gha-graal/actions/runs/35380385079) 13m38s | green |
+| `java_desktop_integration` | [35378067180](https://github.com/Throwaway68/gha-graal/actions/runs/35378067180) 43m26s | [35378074436](https://github.com/Throwaway68/gha-graal/actions/runs/35378074436) 18m07s | green |
+| `truffle_unittests` | [35380341570](https://github.com/Throwaway68/gha-graal/actions/runs/35380341570) | [35380392612](https://github.com/Throwaway68/gha-graal/actions/runs/35380392612) | **known gap on both platforms** |
+| `hellomodule` | - | - | **known gap on both platforms** |
+| `debuginfotest`, standalone pointsto | - | - | skipped on Windows by `svm_gate_body` |
+
+`helloworld` builds and runs a native `javac`, four helloworld variants (one of them a shared
 library called through ctypes), `cinterfacetutorial` and `clinittest`, all with the backend.
 `hellomodule` builds and runs three of its four variants on both platforms and cannot build the
-fourth (`-H:+RuntimeClassLoading`): the Ristretto interpreter's bytecode-handler stubs use Graal's
-multi-value return, which the LLVM backend does not implement - on any platform, linux-amd64
-included. How expensive implementing it would be is an open question; the journal has the numbers
-and the analysis.
+fourth (`-H:+RuntimeClassLoading`), and `truffle_unittests` cannot build its image at all: the first
+needs Graal's multi-value return (the Ristretto interpreter's bytecode-handler stubs), the second
+needs runtime compilation, and the LLVM backend implements neither - on any platform, linux-amd64
+included, and upstream says so itself (`RuntimeCompilationFeature`: "Runtime compilation is
+currently unimplemented on the LLVM backend (GR-43073)"). `debuginfotest` and the standalone
+pointsto unittests are skipped on Windows by `svm_gate_body` itself, backend or no backend.
+
+Tests that cannot run under the backend are listed with their reason in
+`substratevm/mx.substratevm/llvm-unittest-blacklist` on the graal branch; `mx native-unittest` uses
+that file only when the build arguments contain `--tool:llvm-backend` and the caller passed no
+`--blacklist` of its own, so a build without the backend runs exactly the same tests as before.
 
 **Interactive session on the runner.** `-f debug_ssh=true` stops the dev job after `dev-run`, and
 the gate job after the gate, and opens a shell on the runner: tmate on linux/macOS, and on
