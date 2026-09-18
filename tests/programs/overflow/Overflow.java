@@ -13,6 +13,8 @@ public class Overflow {
     }
 
     static volatile int sink;          // defeats constant folding; always 0
+    // `deep` is kept identical to stress's, finally block included, so the recovery this checks is
+    // the same code stress exercises; finallyCount is only what keeps it so.
     static int finallyCount;
     static int failures;
 

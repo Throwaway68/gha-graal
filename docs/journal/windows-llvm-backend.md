@@ -841,6 +841,10 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   | 35325689605 | `stress`, 11 checks | `OK gc-pressure` | `threads-basic` | 134 (abort after the `SegfaultHandler` dump) |
   | 35326741758 | `stress`, 11 checks | `STRESS OK` | - | 0 |
 
+  Only `stress` has ever run on the LLVM backend: `tests/programs/overflow` and
+  `tests/programs/excgc`, which carry the two checks taken out of it, are **verified on HotSpot
+  only** - no workflow run has been spent on either.
+
   Timings are stable across all three: job 7m48s / 7m47s / 7m57s, `Build` 5m39s / 5m43s / 5m38s,
   `dev-run` 1m03s / 1m07s / 1m07s of which native-image is ~58 s. The image is 8.83 MiB from 5,265
   compilation units, Serial GC, and the build prints no warnings. The green run's stderr is empty.
@@ -867,9 +871,9 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `tests/programs/overflow`; green on HotSpot.
 
 - 2026-09-18 (task 2, run https://github.com/Throwaway68/gha-graal/actions/runs/35325689605):
-  **on linux-amd64 the LLVM backend loses track of references that are live across an invoke whose
-  exception edge is taken: a collection moves the objects and the code after the landing pad keeps
-  the old addresses.** Thread `worker-5` in `Stress.lambda$threadsBasic$0`, SIGSEGV with
+  **on linux-amd64 `stress` crashed in `threads-basic` with the lambda's captured references
+  pointing above every mapped heap chunk, in the code after `catch (Boom)`.** Thread `worker-5` in
+  `Stress.lambda$threadsBasic$0`, SIGSEGV with
   `si_code 2` (SEGV_ACCERR) at `heapBase + 116918892`, 1.448 s in, after 51 incremental and 3
   complete collections, one of which another worker had queued 19 ms earlier. The faulting
   instruction is `lock incl 0x4(%r9)` (the unused-result `caught.incrementAndGet()`, weakened from
@@ -877,19 +881,24 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   (`atomic.addAndGet(junk[i % 256])`): so `%r8` and `%r9` are the lambda's captured `AtomicLong` and
   `AtomicInteger`, and they - with `%rsi` and `%rdi` - all point at `0x00007fbe1c500a??`, which the
   dump calls "an unknown value" because it is above every mapped eden chunk (the highest ends at
-  `0x00007fbe1c300000`). Those objects were promoted out of that region; the frame reloaded them
-  unrelocated in the iteration after `catch (Boom b)`. Two thread locals in the dump are nonsense
-  for a live thread as well (`StackOverflowCheckImpl.stackBoundaryTL = 1`,
-  `yellowZoneStateTL = 0x7efefefe`).
+  `0x00007fbe1c300000`). *Inference*, not something the dump states: a collection moved those
+  objects out of that region and the frame went on using the pre-collection addresses in the
+  iteration after `catch (Boom b)`. (`StackOverflowCheckImpl.stackBoundaryTL = 1` and
+  `yellowZoneStateTL = 0x7efefefe` in the same dump are **not** a clue - they are exactly what
+  `StackOverflowCheckImpl.disableStackOverflowChecksForFatalError()` sets on the crashing thread
+  before the dump is printed.)
 
   **Hypothesis: references live across an invoke are not reported to the GC on the unwind edge**, so
   the statepoint for the exception path does not relocate them. It fits the contrast in the same
   program: `gc-live-frames` and `gc-pressure` do heavy GC with live references and pass, and
   `threads-gc` passes, but only `threads-basic` combined a caught exception with an allocating loop.
-  Not proven - it is what the register dump shows. `tests/programs/excgc` is the reduced
-  single-threaded reproducer (20,000 rounds of `new int[4096]`, `deep(5)` caught, then a field of a
-  captured object updated); it is green on HotSpot and **has not yet been run on the backend**, so
-  it is not confirmed to reproduce the crash.
+  Not proven - it is one reading of the register dump. `tests/programs/excgc` is the reduced
+  single-threaded reproducer: 20,000 rounds of `new int[4096]` and a caught `deep(5)`, where
+  `deep(0)` allocates and, every 64th round, calls `System.gc()` from the deepest frame before
+  throwing, so 313 collections are taken *while the throwing call is on the stack* and three
+  references live across that invoke (`counter`, `box`, `junk`) are summed after the catch. It is
+  green on HotSpot in 0.7 s and **has not yet been run on the backend**, so it is not confirmed to
+  reproduce the crash.
 
   For both this and the `StackOverflowError` crash: **whether stock upstream graal's Linux LLVM
   backend behaves the same is unknown** - no run against an unmodified ref was made - so it is not
