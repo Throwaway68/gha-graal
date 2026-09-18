@@ -27,8 +27,8 @@ win_diag() {
   obj=$(ls "$W"/tmp/*/llvm/llvm.obj 2>/dev/null | head -1) || true
   bin=$H/lib/llvm/bin
   if [ -n "$obj" ] && { [ -e "$bin/llvm-nm" ] || [ -e "$bin/llvm-nm.exe" ]; }; then
-    echo "-- markers and SEH glue in $obj"
-    "$bin/llvm-nm" "$obj" 2>&1 | grep -E '__svm_code_section|__svm_text_end|__svm_seh_personality' || true
+    echo "-- markers, SEH glue and stack probes in $obj"
+    "$bin/llvm-nm" "$obj" 2>&1 | grep -E '__svm_code_section|__svm_text_end|__svm_seh_personality|chkstk' || true
     echo "-- .text sections of $obj"
     "$bin/llvm-readobj" --section-headers "$obj" 2>&1 \
       | grep -E 'Name: \.text|VirtualSize|RawDataSize|Alignment' | head -60 || true
