@@ -34,14 +34,16 @@ GraalVM-convention function on Win64 gets the Win64 argument registers but no 32
 C callers and every entry point with more than four arguments disagree about the fifth one. Nothing
 changes off Windows. The Windows LLVM backend needs that release.
 
-**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round1-win-llvm -f platforms=linux-amd64,windows-amd64`
+**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round2-win-llvm -f platforms=linux-amd64,windows-amd64`
 (the first two are also the defaults; `platforms` must exclude darwin-aarch64 for now, see the
 platform status below). Builds any graal ref against the LLVM release: graal's
 downloads from `lafo.ssw.uni-linz.ac.at/pub/llvm` are redirected with `MX_URLREWRITES`
 (pattern + digest override), so no suite file is edited. Every platform runs
 `scripts/graalvm/smoke.sh` (java, native-image, `lli`, a C hello world through the bundled
 toolchain, and a Java hello world with `--tool:llvm-backend` wherever the GraalVM carries
-`lib/svm/tools/llvm-backend`) before it packages. Publishes release `graalvm-<label>` with a
+`lib/svm/tools/llvm-backend`) and then, where the backend is there,
+`scripts/graalvm/smoke-stress.sh` (`tests/programs/stress` through `dev-run.sh`: exceptions, GC and
+threads) before it packages. Publishes release `graalvm-<label>` with a
 `.tar.gz` per Unix platform, a `.zip` for Windows, and `manifest.json`, as a draft whose ~1 GB
 assets are uploaded one by one with retries and verified before the draft flag is cleared -
 the same hardening as `llvm.yml`, and for the same HTTP 500s.
@@ -125,29 +127,48 @@ the evidence behind the design decisions recorded in the journal.
    record of what was tried in task 4 and nothing references it (see the journal's Decisions).
    `graal/25.3.4.1-ci` stays as it was, for comparing against the darwin-only change.
 
-## Platform status (2026-09-17)
+## Platform status (2026-09-18)
 
 | Platform | LLVM toolchain | Sulong (`lli`) | Native Image LLVM backend |
 |----------|----------------|----------------|---------------------------|
-| linux-amd64 | yes | yes | yes, smoke-tested (`--tool:llvm-backend`) |
-| windows-amd64 | yes | yes | yes (round 1: hello world), smoke-tested on `graal/25.3.4.1-win-llvm` |
+| linux-amd64 | yes | yes | yes (round 2: exceptions, GC, threads), smoke-tested (`--tool:llvm-backend`) |
+| windows-amd64 | yes | yes | yes (round 2: exceptions, GC, threads), smoke-tested on `graal/25.3.4.1-win-llvm` |
 | darwin-aarch64 | yes | yes | no: `llc` rejects the aarch64 batches |
 
-Round 1 on windows-amd64 means exactly what the smoke test shows: `native-image
---tool:llvm-backend` builds a Java hello world and the image prints and exits 0. Exceptions unwind
-through libunwind in SEH mode, but nothing beyond a hello world has been run; see the journal for
-what each piece does. The build is published as
-[`graalvm-round1-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round1-win-llvm)
-(`graal/25.3.4.1-win-llvm` at `fea81ecaff4` against `llvm-22.1.8-graal.3`).
+Releases of the Windows backend branch, newest first:
+
+- [`graalvm-round2-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round2-win-llvm):
+  `graal/25.3.4.1-win-llvm` at `4def28820c5` against `llvm-22.1.8-graal.3`, linux-amd64 and
+  windows-amd64. Round 2 means the release's own smoke test builds and runs `tests/programs/stress`
+  with `--tool:llvm-backend` on both platforms, not just a hello world: a throw caught 60 frames up
+  whose stack trace must still show 60 frames, six kinds of implicit exception (NPE, array index,
+  division, class cast, array store, negative array size), rethrow-and-wrap through a lambda,
+  `finally` ordering, garbage collections taken through live frames, a weak reference that must be
+  cleared and enqueued, 1 GiB of allocation pressure with a checked survivor set, threads
+  (start/join, `synchronized`, `wait`/`notify`, collections taken while eight threads run) and an
+  uncaught exception on a second thread. Eleven `OK <check>` lines and `STRESS OK`; see the journal
+  for what each Windows-specific piece does.
+- [`graalvm-round1-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round1-win-llvm):
+  `graal/25.3.4.1-win-llvm` at `fea81ecaff4` against `llvm-22.1.8-graal.3`. Round 1 meant exactly
+  what its smoke test showed: `native-image --tool:llvm-backend` builds a Java hello world and the
+  image prints and exits 0. Exceptions unwound through libunwind in SEH mode, but nothing beyond a
+  hello world had been run.
+
+What `stress` does **not** cover, and is therefore still open: `tests/programs/overflow` (a
+`StackOverflowError` caught after recursion) fails on windows-amd64 *and* on linux-amd64, so it is a
+backend bug rather than a Windows one; JNI in both directions and a throw across an MSVC-compiled
+frame are untested (round 4); and the substratevm LLVM gate has not been run on this branch
+(round 3). The journal has the detail for each.
 
 On darwin-aarch64 the branch registers the backend as well - the module problem of
 `graal/25.3.4.1-ci` is gone, because this branch uses the stock `org.bytedeco` jars on every
 platform - but the smoke test still fails in the backend: `llc` refuses
 `llvm.read_register`/`llvm.write_register` on `x27` and `x28` (heap base and thread pointer), so
-no aarch64 batch compiles. That is open for round 2 and the reason release
-`graalvm-round1-win-llvm` carries linux-amd64 and windows-amd64 only. Until it is fixed, a release
-build has to be started with `-f platforms=linux-amd64,windows-amd64`: the release job needs every
-matrix job, so one failing darwin job means no release at all.
+no aarch64 batch compiles. It was out of scope for round 2 (Windows only) and is the reason
+releases `graalvm-round1-win-llvm` and `graalvm-round2-win-llvm` carry linux-amd64 and
+windows-amd64 only. Until it is fixed, a release build has to be started with
+`-f platforms=linux-amd64,windows-amd64`: the release job needs every matrix job, so one failing
+darwin job means no release at all.
 
 The backend's tool macro sets the experimental `-H:CompilerBackend=llvm` option, so use
 `native-image -H:+UnlockExperimentalVMOptions --tool:llvm-backend ...` (or leave

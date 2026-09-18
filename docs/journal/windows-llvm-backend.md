@@ -231,6 +231,75 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   Windows run of `stress` is https://github.com/Throwaway68/gha-graal/actions/runs/35329170964; one
   ssh session of 75 minutes (artifact at 09:34Z, hold released at 10:49Z) was enough for both.
 
+- 2026-09-18: **Round 2 release `graalvm-round2-win-llvm`**
+  (https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round2-win-llvm, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35338722995), built by `graalvm.yml` from
+  `round2-release` against `graal/25.3.4.1-win-llvm` head `4def28820c5` and `llvm-22.1.8-graal.3`,
+  platforms linux-amd64 and windows-amd64. Three assets, each uploaded on attempt 1/6 and verified
+  by published size and `state == uploaded` before the draft flag was cleared:
+  `graalvm-round2-win-llvm-linux-amd64.tar.gz` (1,166,391,413 B),
+  `graalvm-round2-win-llvm-windows-amd64.zip` (1,675,285,299 B), `manifest.json`.
+
+  **What makes it round 2: the release gate is no longer a hello world.** `graalvm.yml`'s smoke step
+  now runs `scripts/graalvm/smoke-stress.sh` after `smoke.sh` wherever the built GraalVM carries the
+  backend, i.e. it builds `tests/programs/stress` with `native-image --tool:llvm-backend` and checks
+  its output with `dev-run.sh`. Both platforms printed the same thing:
+
+  ```
+  LLVM backend: tested
+  SMOKE OK
+  ...
+  deep frames in trace: 61
+  OK throw-catch-deep
+  OK implicit-exceptions
+  OK rethrow-wrap
+  OK finally-order
+  OK gc-live-frames
+  OK gc-weakref
+  OK gc-pressure
+  OK threads-basic
+  OK threads-gc
+  OK threads-wait-notify
+  OK thread-exceptions
+  STRESS OK
+  DEV-RUN OK
+  ```
+
+  (windows-amd64 also prints `Stress on Windows Server 2022, 4 cpus`.) Timings, run 11:15:21Z to
+  11:55:57Z, 40m36s wall:
+
+  - **linux-amd64** job 31m26s: build 25m48s, smoke 2m06s (`hello-llvm` in 59.3s, `app` in 59.0s),
+    package 2m09s, upload 12s.
+  - **windows-amd64** job 38m41s: build 32m16s, smoke 3m10s (`hello-llvm` in 1m32s, `app` in
+    1m26s), package 1m53s, upload 17s.
+  - **release job** 1m40s.
+
+  The stress step costs about a minute per platform on top of the hello world - cheap enough that
+  there is no reason to publish a backend that cannot throw, collect or start a thread again.
+
+  **Still open after round 2**, in the order they are likely to be tackled:
+
+  - *Round 3, the substratevm LLVM gate.* The backend has never been run against substratevm's own
+    gate on this branch; `stress` is eleven checks written for this port, not a test suite.
+  - *Round 4, JNI in both directions and a throw across an MSVC-compiled frame.* Still exactly as
+    round 1 left it (see "what round 2 should verify" in Findings): Java -> JNI -> Java -> throw
+    caught in the outer Java frame is the one path where libunwind's SEH mode has to restore R14/R15
+    through frames it did not compile, and JNI wrappers sit outside
+    `[__svm_code_section, __svm_text_end)` by design. `stress` touches neither.
+  - *`tests/programs/overflow` fails on both platforms* - windows-amd64 with a recursive unwind that
+    ends in `EXCEPTION_STACK_OVERFLOW`, linux-amd64 with a bare SIGSEGV (run 35336472456). A
+    backend bug on both, not a Windows one, and untested against stock upstream graal.
+  - *`tests/programs/excgc` passes on both platforms*, so the task-2 hypothesis it was written for -
+    references live across an invoke are not reported to the GC on the unwind edge - is still
+    neither confirmed nor refuted. A threaded reproducer is the obvious next try. Also untested
+    against stock upstream graal.
+  - *darwin-aarch64 stays out of the release.* `llc` rejects `llvm.read_register` /
+    `llvm.write_register` on `x27`/`x28`, so no aarch64 batch compiles; out of scope for round 2,
+    which was Windows only.
+  - *A large-frame method that actually emits `__chkstk`* has still not been built, so the
+    msvc/mingw stack-probe question remains theoretical (no probe symbol appears in any image so
+    far).
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -1089,8 +1158,9 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   from `GCImpl.walkStack` -> `CodeInfoTable.fatalErrorNoReferenceMap`, `0x...a137f` being that
   function + 0xf. Calls that are not followed by the epilogue are recorded at the return address
   exactly (`Gc1.main`'s first `slowNewArray` call returns to +0x2c and the record says `[44]`), so
-  only calls in front of an epilogue shift - and in a method with more than one call the shift is
-  silent and worse than a crash, because the GC then reads the reference map of the call before it.
+  only calls in front of an epilogue shift - and the shift is never silent, whatever else the method
+  contains: the lookup is by exact instruction pointer, so such a frame always fails at the first
+  collection through it (corrected here in task 4; see the correction entry below).
   `LLVMObjectFileReader.readStackMap` now reads the machine code of the batch object back and moves
   the `Call` infopoint one byte earlier when a `0x90` sits in front of the recorded offset, which is
   sound in the object `llc` writes: a call there ends either in the still unrelocated - so zero -
@@ -1163,6 +1233,42 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `stress` keeps `threads-basic` without the caught exception and is green on both platforms, so the
   open question is what `excgc` would have to add to reproduce; a threaded version is the obvious
   next try.
+
+- 2026-09-18 (round 2, task 4, release run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35338722995): **what round 2 changed on
+  `graal/25.3.4.1-win-llvm`** - three commits on top of round 1's head `fea81ecaff4`, all three
+  behind `LLVMWindowsSupport.isWindows()` or comment-only, so linux-amd64 sees no change:
+
+  - `acd5863e29d` - `LLVMGenerator.emitReadCallerStackPointer` builds the caller's stack pointer on
+    Windows from `llvm.addressofreturnaddress() + 1 word` instead of
+    `llvm.frameaddress(0) + getCallerSPOffset()`, because on Win64 `llvm.frameaddress(0)` is the SEH
+    establisher frame (`rbp - SEHFrameOffset`, i.e. this frame's own stack pointer for frames up to
+    128 bytes), not the frame-pointer chain node, so every stack walk started inside the frame it
+    should have started above. Without it `getStackTrace()` reads a local as a return address.
+  - `61c1437467e` - `LLVMObjectFileReader` reads the batch object's `.text$svm1` back and
+    `LLVMWindowsSupport.returnAddressOffset` moves a statepoint `Call` infopoint one byte earlier
+    when a `0x90` sits in front of the recorded offset, because `maybeEmitNopAfterCallForWindowsEH`
+    pads a call that is the last instruction before the epilogue and the stack map label then names
+    the padding. Without it every image died in its first collection with "No reference map
+    information found".
+  - `4def28820c5` - no behaviour change: corrects the two comments above (`llvm.frameaddress(0)` is
+    `rbp - min(frame size, 128)` rounded down to 16, not simply RSP; a shifted statepoint record
+    always fails loudly, see the correction below) and adds a `VMError.guarantee` so a batch object
+    without a `.text$svm1` section is reported by name instead of NPE-ing inside
+    `returnAddressOffset`.
+
+- 2026-09-18 (round 2, task 4, review of task 3, no run): **a shifted statepoint record can never
+  silently use another call's reference map** - the `61c1437467e` javadoc and the finding above said
+  it could, in a method with more than one call. It cannot:
+  `CodeInfoDecoder.lookupStackReferenceMapIndex` walks the entries for the frame's IP and returns
+  `loadReferenceMapIndex` only on `entryIP == relativeIP`, `ReferenceMapIndex.NO_REFERENCE_MAP`
+  otherwise, and `CodeInfoTable.lookupCodeInfo` behaves the same way, so an infopoint registered one
+  byte past the real return address is simply never found. The first GC through such a frame dies in
+  `CodeInfoTable.fatalErrorNoReferenceMap` with "No reference map information found" - which is
+  exactly what was observed - however many calls the method has. The fix is unchanged; only its
+  explanation was wrong: `4def28820c5` corrects it in the source and the `61c1437467e` finding above
+  is corrected in place, where it used to say that in a method with more than one call the shift is
+  silent and worse than a crash.
 
 
 ## Decisions
