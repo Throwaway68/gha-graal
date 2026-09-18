@@ -57,13 +57,15 @@ Write-LfFile $ak $keys
 icacls $ak /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
 # Public keys and nothing else: `PasswordAuthentication no` alone leaves keyboard-interactive
 # (default yes) as a second, password-backed way in for an account that is an administrator.
-# `AuthenticationMethods` is prepended rather than appended, because the file ends in the
-# `Match Group administrators` block and a keyword after a Match line belongs to that block.
+# The two hard lines are prepended, not appended, for two reasons: sshd takes the *first* value of
+# a keyword, and the stock Windows sshd_config ends in the `Match Group administrators` block,
+# where anything appended would land. Prepending also covers what the replacements cannot - that
+# file carries no KbdInteractiveAuthentication line at all, so there is nothing to rewrite.
 $cfg = 'C:\ProgramData\ssh\sshd_config'
 $body = (Get-Content $cfg) -replace '^#?PasswordAuthentication .*', 'PasswordAuthentication no' `
                            -replace '^#?(KbdInteractiveAuthentication|ChallengeResponseAuthentication) .*', 'KbdInteractiveAuthentication no' `
                            -replace '^#?PubkeyAuthentication .*', 'PubkeyAuthentication yes'
-Write-LfFile $cfg (@('AuthenticationMethods publickey') + $body)
+Write-LfFile $cfg (@('AuthenticationMethods publickey', 'KbdInteractiveAuthentication no') + $body)
 
 # Git bash as the login shell. DefaultShellCommandOption matters as much as DefaultShell: without
 # it sshd passes cmd.exe's `/c` to the shell, so `ssh <host> '<command>'` runs nothing.
