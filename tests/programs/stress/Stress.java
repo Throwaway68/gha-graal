@@ -13,9 +13,10 @@ import java.util.function.IntSupplier;
  * references in compiled frames, threads. One "OK <check>" line per check; expected.txt
  * lists them all. A failing check prints "FAIL <check>" and the process exits 1.
  *
- * The StackOverflowError check lives in its own program, tests/programs/overflow, because the
- * LLVM backend segfaults on it (see that program's comment): here it would hide the checks
- * after it.
+ * Two checks live in their own programs because the linux-amd64 LLVM backend crashes on them,
+ * which here would hide every check after it: StackOverflowError in tests/programs/overflow, and
+ * catching an exception in an allocating loop in tests/programs/excgc. What is left is the set of
+ * checks that pass on that backend.
  */
 public class Stress {
     static final class Boom extends Exception {
@@ -195,7 +196,6 @@ public class Stress {
         final Object lock = new Object();
         final int[] counter = {0};
         final AtomicLong atomic = new AtomicLong();
-        final AtomicInteger caught = new AtomicInteger();
         final CountDownLatch start = new CountDownLatch(1);
         Thread[] ts = new Thread[threads];
         for (int t = 0; t < threads; t++) {
@@ -208,11 +208,6 @@ public class Stress {
                 for (int i = 0; i < rounds; i++) {
                     int[] junk = new int[256];
                     junk[i % 256] = i;
-                    try {
-                        deep(5);
-                    } catch (Boom b) {
-                        if (b.depth == 0) caught.incrementAndGet();
-                    }
                     atomic.addAndGet(junk[i % 256]);
                     synchronized (lock) {
                         counter[0]++;
@@ -224,7 +219,7 @@ public class Stress {
         start.countDown();
         for (Thread t : ts) t.join();
         long expectedAtomic = (long) threads * (rounds - 1) * rounds / 2;
-        check(counter[0] == threads * rounds && atomic.get() == expectedAtomic && caught.get() == threads * rounds, "threads-basic");
+        check(counter[0] == threads * rounds && atomic.get() == expectedAtomic, "threads-basic");
     }
 
     static void threadsGc() throws InterruptedException {
