@@ -5,6 +5,13 @@
 #
 # <program-dir> holds *.java (main class = directory name capitalised, e.g. hello -> Hello)
 # and expected.txt; every line of expected.txt must appear in the program's stdout.
+#
+# Optional parts of a program directory:
+#   javac.flags   one line of extra javac arguments (word-split on purpose)
+#   META-INF/     copied into the classpath, so native-image picks up
+#                 META-INF/native-image/<group>/<artifact>/*-config.json by itself
+#   *.c           compiled by the bundled clang into one shared library named after the
+#                 program; the program is then run with -D<name>.lib=<absolute path>
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 H=${1:?graalvm home}; P=${2:?program dir}; W=${3:?work dir}; shift 3
@@ -41,7 +48,25 @@ win_diag() {
 
 name=$(basename "$P"); main="$(tr '[:lower:]' '[:upper:]' <<<"${name:0:1}")${name:1}"
 mkdir -p "$W/classes" "$W/tmp"
-echo "== javac"; "$JAVAC" -d "$W/classes" "$P"/*.java
+[ -f "$P/javac.flags" ] && JFLAGS=$(cat "$P/javac.flags") || JFLAGS=""
+# $JFLAGS is deliberately unquoted: javac.flags holds a command line, not one argument.
+echo "== javac"; "$JAVAC" $JFLAGS -d "$W/classes" "$P"/*.java
+[ -d "$P/META-INF" ] && cp -R "$P/META-INF" "$W/classes/"
+# Native library: every *.c in the program dir compiled by the bundled clang into one shared
+# library named after the program; the program finds it through -D<name>.lib=<path>.
+# JNI headers come from the GraalVM under test ($H/include), so the library matches the image.
+libprop=()
+if ls "$P"/*.c >/dev/null 2>&1; then
+  echo "== clang (bundled)"
+  CLANG=$(exe "$H/lib/llvm/bin" clang)
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) lib="$W/$name.dll";      cflags=(--target=x86_64-pc-windows-msvc -fuse-ld=lld -shared "-I$H/include" "-I$H/include/win32");;
+    Darwin)               lib="$W/lib$name.dylib"; cflags=(-dynamiclib "-I$H/include" "-I$H/include/darwin");;
+    *)                    lib="$W/lib$name.so";    cflags=(-shared -fPIC "-I$H/include" "-I$H/include/linux");;
+  esac
+  "$CLANG" -O1 ${cflags[@]+"${cflags[@]}"} "$P"/*.c -o "$lib"
+  libprop=("-D$name.lib=$lib")
+fi
 echo "== native-image (LLVM backend)"
 unset NATIVE_IMAGE_EXPERIMENTAL_OPTIONS_ARE_FATAL
 ni=0
@@ -54,7 +79,9 @@ app="$W/app.exe"; [ -e "$app" ] || app="$W/app"
 win_diag
 [ "$ni" -eq 0 ] || { echo "native-image exited with $ni"; exit "$ni"; }
 echo "== run"
-"$app" > "$W/stdout.txt" 2> "$W/stderr.txt" || { echo "program exited with $?"; cat "$W/stdout.txt" "$W/stderr.txt"; exit 1; }
+# ${arr[@]+"${arr[@]}"}: macOS's /bin/bash is 3.2, where "${arr[@]}" on an empty array is an
+# unbound-variable error under `set -u`.
+"$app" ${libprop[@]+"${libprop[@]}"} > "$W/stdout.txt" 2> "$W/stderr.txt" || { echo "program exited with $?"; cat "$W/stdout.txt" "$W/stderr.txt"; exit 1; }
 cat "$W/stdout.txt"
 # Compare without carriage returns: the program prints CRLF on Windows, and expected.txt
 # arrives there with CRLF as well (the runner checks out with core.autocrlf), while grep

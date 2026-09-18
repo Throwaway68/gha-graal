@@ -74,6 +74,50 @@ echo "$out" | grep -q 'DEV-RUN OK' || { echo "$out"; echo "FAIL: CRLF output not
 # and a real mismatch must still fail with CRLF expectations
 printf 'args=7\r\n' > "$T/progcrlf/expected.txt"
 if bash scripts/graalvm/dev-run.sh "$H3" "$T/progcrlf" "$T/work6" >/dev/null 2>&1; then echo "FAIL: CRLF mismatch not detected"; exit 1; fi
+# Native library, javac.flags and META-INF: a program dir with a *.c file must be compiled by the
+# bundled clang ($H/lib/llvm/bin/clang) into one shared library named after the program, and the
+# image must then be run with -D<name>.lib=<that library>. javac.flags is appended to javac and
+# META-INF lands on the classpath so native-image finds the *-config.json files by itself.
+H4=$T/home4; mkdir -p "$H4/bin" "$H4/lib/llvm/bin"; cp "$H/bin/javac" "$H4/bin/javac"
+cat > "$H4/bin/native-image" <<'EOF'
+#!/usr/bin/env bash
+echo "native-image $*" >> "$NI_LOG"
+out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+printf '#!/usr/bin/env bash\necho "app $*" >> "$APP_LOG"\necho "NATIVE OK"\n' > "$out"; chmod +x "$out"
+EOF
+cat > "$H4/lib/llvm/bin/clang" <<'EOF'
+#!/usr/bin/env bash
+echo "clang $*" >> "$CLANG_LOG"
+out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+: > "$out"
+EOF
+chmod +x "$H4/bin/native-image" "$H4/lib/llvm/bin/clang"
+export CLANG_LOG=$T/clang.log APP_LOG=$T/app.log
+mkdir -p "$T/nat/x/META-INF/native-image/gha-graal/x"
+printf 'public class X { public static void main(String[] a) {} }\n' > "$T/nat/x/X.java"
+printf '/* nothing */\n' > "$T/nat/x/x.c"
+printf '[]\n' > "$T/nat/x/META-INF/native-image/gha-graal/x/jni-config.json"
+printf -- '--add-modules org.graalvm.nativeimage\n' > "$T/nat/x/javac.flags"
+printf 'NATIVE OK\n' > "$T/nat/x/expected.txt"
+out=$(bash scripts/graalvm/dev-run.sh "$H4" "$T/nat/x" "$T/work7" 2>&1) \
+  || { rc=$?; echo "$out"; echo "FAIL: native-library dev-run exited $rc"; exit 1; }
+echo "$out" | grep -q 'DEV-RUN OK' || { echo "$out"; echo "FAIL: no DEV-RUN OK for the native-library program"; exit 1; }
+grep -qE -- '-shared|-dynamiclib' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: clang not asked for a shared library"; exit 1; }
+grep -qF -- "-I$H4/include" "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: JNI headers of the GraalVM under test not on the clang command line"; exit 1; }
+grep -qE -- ' [^ ]*/x\.c ' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: the program's *.c not compiled"; exit 1; }
+grep -qE -- '-o [^ ]*/(lib)?x\.(so|dylib|dll)$' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: library not named after the program"; exit 1; }
+lib=$(sed -n 's/.* -o \(.*\)$/\1/p' "$CLANG_LOG"); [ -f "$lib" ] || { echo "FAIL: library $lib not produced"; exit 1; }
+grep -qF -- "app -Dx.lib=$lib" "$APP_LOG" || { cat "$APP_LOG"; echo "FAIL: the image was not run with -Dx.lib=<library>"; exit 1; }
+grep -q -- '--add-modules org.graalvm.nativeimage' "$JAVAC_LOG" || { cat "$JAVAC_LOG"; echo "FAIL: javac.flags not passed to javac"; exit 1; }
+[ -f "$T/work7/classes/META-INF/native-image/gha-graal/x/jni-config.json" ] || { echo "FAIL: META-INF not copied to the classpath"; exit 1; }
+# A program without a *.c file must still run with no extra arguments (the empty-array path, which
+# is what bash 3.2 rejects under `set -u` without the ${arr[@]+"${arr[@]}"} idiom).
+: > "$APP_LOG"
+mkdir -p "$T/nat/plain"; cp tests/programs/hello/Hello.java "$T/nat/plain/"; printf 'NATIVE OK\n' > "$T/nat/plain/expected.txt"
+out=$(bash scripts/graalvm/dev-run.sh "$H4" "$T/nat/plain" "$T/work8" 2>&1) \
+  || { rc=$?; echo "$out"; echo "FAIL: dev-run exited $rc without a *.c file"; exit 1; }
+grep -qx -- 'app ' "$APP_LOG" || { cat "$APP_LOG"; echo "FAIL: the image got arguments although the program has no *.c"; exit 1; }
+
 # Output mismatch must fail
 printf 'args=7\n' > "$T/expected.txt"; mkdir -p "$T/prog"; cp tests/programs/hello/Hello.java "$T/prog/"; cp "$T/expected.txt" "$T/prog/expected.txt"
 if bash scripts/graalvm/dev-run.sh "$H" "$T/prog" "$T/work2" >/dev/null 2>&1; then echo "FAIL: mismatch not detected"; exit 1; fi
