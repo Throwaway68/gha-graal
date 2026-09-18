@@ -466,7 +466,94 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   and `dlsym(RTLD_DEFAULT, ...)` elsewhere, then calls with the current isolate thread. Per
   platform, all at `54969a2cee8`: **windows-amd64 green, linux-amd64 green**, darwin-aarch64 not
   run in CI but green locally with the stock default backend. It is deliberately not part of
-  `complex`, so that `complex` stays byte-identical everywhere.
+  `complex`, so that `complex` stays byte-identical everywhere. (darwin-aarch64 closed in task 3:
+  green in the round 4 release's smoke test, run 35365165424, on its first CI run.)
+
+- 2026-09-18: **Round 4 release `graalvm-round4-win-llvm`, the first release on all three
+  platforms** (https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round4-win-llvm, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35365165424), built by `graalvm.yml` from
+  `round4-release` against `graal/25.3.4.1-win-llvm` head `54969a2cee8` ("LLVM backend: export a
+  shared library's entry points on PE/COFF", round 3's fix) and `llvm-22.1.8-graal.3`. Four assets,
+  each uploaded on attempt 1/6 and verified by published size and `state == uploaded` before the
+  draft flag was cleared: `graalvm-round4-win-llvm-linux-amd64.tar.gz` (1,166,373,613 B),
+  `graalvm-round4-win-llvm-windows-amd64.zip` (1,675,268,601 B),
+  `graalvm-round4-win-llvm-darwin-aarch64.tar.gz` (960,255,775 B), `manifest.json` (621 B).
+
+  **What makes it round 4: the release gate runs three programs, and the third one is the linker.**
+  `scripts/graalvm/smoke-stress.sh` now builds and runs `stress`, then `complex`, then `export`,
+  each in its own work directory (`$2/stress`, `$2/complex`, `$2/export`). All three platforms
+  printed the same sequence - eleven `OK` lines and `STRESS OK`, sixteen and `COMPLEX OK`, one and
+  `EXPORT OK`, each followed by `DEV-RUN OK`:
+
+  ```
+  LLVM backend: tested
+  SMOKE OK
+  ...
+  STRESS OK
+  DEV-RUN OK
+  ...
+  OK jni-add / jni-string / jni-array / jni-upcall / jni-upcall-string / jni-upcall-throw
+  OK jni-native-throw / centrypoint-pointer / jni-threads / records-sealed-switch / regex
+  OK streams-format / bigint / file-io / reflection / collectors
+  COMPLEX OK
+  DEV-RUN OK
+  Export on <os>, image=true
+  OK centrypoint-export
+  EXPORT OK
+  DEV-RUN OK
+  ```
+
+  Green on the first dispatch, with no platform guard and no re-dispatch. The one genuinely unknown
+  cell was `export` on darwin-aarch64 - it had never run in CI, on any backend - and it passed:
+  Mach-O needs no equivalent of the PE/COFF `/EXPORT:` fix, because the final link exports the
+  image's global symbols anyway and `dlsym(RTLD_DEFAULT, "gha_export_add")` finds it in the
+  executable.
+
+  Timings, run 15:53:32Z to 16:40:05Z, 46m33s wall:
+
+  - **linux-amd64** job 32m32s: build 24m06s, smoke 5m02s, package 2m26s, upload 10s. Image builds
+    inside the smoke step: `hello-llvm` 54.8s, `stress` 55.3s, `complex` 1m35s, `export` 1m22s.
+  - **darwin-aarch64** job 38m11s: build 31m28s, smoke 4m26s, package 1m23s, upload 16s. Images:
+    47.0s, 53.2s, 1m24s, 1m9s.
+  - **windows-amd64** job 43m50s: build 31m54s, smoke 8m15s, package 2m01s, upload 11s. Images:
+    1m28s, 1m21s, 2m46s, 2m18s.
+  - **release job** 2m28s, uploads 1m39s of it.
+
+  The two extra programs cost about 2 minutes per platform on linux/darwin and 5 on Windows - the
+  same trade round 2 made for `stress`, and now a release cannot be published whose backend fails
+  to cross the JNI boundary or to export an entry point.
+
+  **Still open after round 4**, in the order they are likely to be tackled:
+
+  - *The substratevm LLVM gate is partly done.* Round 3 built `graalvm-gate.yml` and its
+    `build,helloworld` tags **pass** at `54969a2cee8` on linux-amd64
+    (https://github.com/Throwaway68/gha-graal/actions/runs/35363511118, 24m58s) and windows-amd64
+    (https://github.com/Throwaway68/gha-graal/actions/runs/35363499659, 35m20s) - `javac-image`,
+    the four `helloworld` variants including `--shared`, `cinterfacetutorial` and `clinittest`.
+    The remaining tags (native unit tests, `check_svm_invariants`, truffle tests, ...) are round 3
+    task 2's, in flight as this is written, and the gate has not been run on darwin-aarch64 at all.
+  - *`hellomodule` cannot be green under the backend on any platform.* Its
+    `-H:+RuntimeClassLoading` variant compiles the Ristretto interpreter's bytecode-handler stubs,
+    which use Graal's multi-value return plus tail call; `LLVMGenerator.getResult` /
+    `emitMultiReturns` is unimplemented, so the image builder aborts with
+    `unimplemented: the LLVM backend doesn't produce an LIRGenerationResult` (run 35367142767 at
+    the head commit). A new backend feature, and plausibly an LLVM calling-convention change.
+  - *`tests/programs/overflow` - a caught `StackOverflowError` - still fails* on windows-amd64
+    (recursive unwind ending in `EXCEPTION_STACK_OVERFLOW`) and linux-amd64 (bare SIGSEGV, run
+    35336472456); a backend bug on both, untested on darwin-aarch64 and against stock upstream
+    graal.
+  - *The threads+catch crash is still unreproduced.* A caught exception inside an allocating
+    eight-thread loop crashed the linux-amd64 image with stale references after the catch (run
+    35325689605); `tests/programs/excgc`, written to reproduce it single-threaded, passes
+    everywhere, and `complex`'s `jni-threads` check (six threads through JNI, one of them catching)
+    did not provoke it either.
+  - *A throw across an MSVC-compiled frame is still untested.* `complex` sends exceptions across
+    the JNI boundary in both directions, but in each case the C frame is entered and left normally;
+    no exception is propagated *through* a frame `cl.exe` emitted. That is the one path where
+    libunwind's SEH mode has to restore the reserved registers through frames the backend did not
+    compile.
+  - *A large-frame method that actually emits `__chkstk`* has still not been built, so the
+    msvc/mingw stack-probe question remains theoretical.
 
 ## Findings
 

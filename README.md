@@ -34,17 +34,18 @@ GraalVM-convention function on Win64 gets the Win64 argument registers but no 32
 C callers and every entry point with more than four arguments disagree about the fifth one. Nothing
 changes off Windows. The Windows LLVM backend needs that release.
 
-**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round2-win-llvm -f platforms=linux-amd64,windows-amd64`
-(the first two are also the defaults; `platforms` has excluded darwin-aarch64 up to and including
-the round 2 release - the backend works there since 2026-09-18 but no release has been built with it
-yet, see the platform status below). Builds any graal ref against the LLVM release: graal's
+**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round4-win-llvm -f platforms=linux-amd64,windows-amd64,darwin-aarch64`
+(the first two are also the defaults, and so is that `platforms` list; releases 1 and 2 left
+darwin-aarch64 out because the backend did not work there yet, `graalvm-round4-win-llvm` is the
+first to carry all three - see the platform status below). Builds any graal ref against the LLVM release: graal's
 downloads from `lafo.ssw.uni-linz.ac.at/pub/llvm` are redirected with `MX_URLREWRITES`
 (pattern + digest override), so no suite file is edited. Every platform runs
 `scripts/graalvm/smoke.sh` (java, native-image, `lli`, a C hello world through the bundled
 toolchain, and a Java hello world with `--tool:llvm-backend` wherever the GraalVM carries
 `lib/svm/tools/llvm-backend`) and then, where the backend is there,
-`scripts/graalvm/smoke-stress.sh` (`tests/programs/stress` through `dev-run.sh`: exceptions, GC and
-threads) before it packages. Publishes release `graalvm-<label>` with a
+`scripts/graalvm/smoke-stress.sh` (`tests/programs/stress`, `complex` and `export` through
+`dev-run.sh`: exceptions, GC and threads; JNI in both directions; an entry point a C caller
+resolves by its symbol) before it packages. Publishes release `graalvm-<label>` with a
 `.tar.gz` per Unix platform, a `.zip` for Windows, and `manifest.json`, as a draft whose ~1 GB
 assets are uploaded one by one with retries and verified before the draft flag is cleared -
 the same hardening as `llvm.yml`, and for the same HTTP 500s.
@@ -156,12 +157,24 @@ the evidence behind the design decisions recorded in the journal.
 
 | Platform | LLVM toolchain | Sulong (`lli`) | Native Image LLVM backend |
 |----------|----------------|----------------|---------------------------|
-| linux-amd64 | yes | yes | yes (round 2: exceptions, GC, threads; round 4: JNI both ways, exported entry points), smoke-tested (`--tool:llvm-backend`) |
-| windows-amd64 | yes | yes | yes (round 2: exceptions, GC, threads; round 4: JNI both ways, exported entry points), smoke-tested on `graal/25.3.4.1-win-llvm` |
-| darwin-aarch64 | yes | yes | yes (round 2: exceptions, GC, threads; round 4: JNI both ways) on `graal/25.3.4.1-win-llvm`; `graalvm.yml`'s own smoke test has not been run there yet |
+| linux-amd64 | yes | yes | yes - `stress` (exceptions, GC, threads), `complex` (JNI both ways) and `export` (an entry point resolved by its symbol) in the round 4 release's own smoke test |
+| windows-amd64 | yes | yes | yes, on `graal/25.3.4.1-win-llvm` - same three programs in the round 4 release's own smoke test |
+| darwin-aarch64 | yes | yes | yes, on `graal/25.3.4.1-win-llvm` - same three programs in the round 4 release's own smoke test (first release to carry this platform) |
 
 Releases of the Windows backend branch, newest first:
 
+- [`graalvm-round4-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round4-win-llvm):
+  `graal/25.3.4.1-win-llvm` at `54969a2cee8` against `llvm-22.1.8-graal.3`, **all three platforms**
+  (run [35365165424](https://github.com/Throwaway68/gha-graal/actions/runs/35365165424), 46m33s,
+  green on the first try). Round 4 means the release's own smoke test runs three programs with
+  `--tool:llvm-backend` on every platform, not one: `stress` as in round 2, then `complex` - JNI in
+  both directions against a shared library the *bundled* clang builds on the runner, an upcall
+  whose Java side throws, a `ThrowNew` caught in Java, a `@CEntryPoint` entered from C through a
+  function pointer, the same traffic from six threads, plus ordinary library code (records, regex,
+  streams, BigInteger, file IO, reflection, collectors) - and then `export`, where C resolves the
+  image's own `@CEntryPoint` by the symbol the annotation names. Each of the three prints its `OK
+  <check>` lines and `STRESS OK` / `COMPLEX OK` / `EXPORT OK`. This is also the first release built
+  for darwin-aarch64 and the first CI run of `export` there.
 - [`graalvm-round2-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round2-win-llvm):
   `graal/25.3.4.1-win-llvm` at `4def28820c5` against `llvm-22.1.8-graal.3`, linux-amd64 and
   windows-amd64. Round 2 means the release's own smoke test builds and runs `tests/programs/stress`
@@ -184,9 +197,15 @@ What `stress` does **not** cover, and is therefore still open: `tests/programs/o
 backend bug rather than a Windows one; a caught exception inside an allocating eight-thread loop
 crashed the linux-amd64 image with stale references after the catch (run 35325689605) and was taken
 out of `stress`, and `tests/programs/excgc`, written to reproduce it single-threaded, passes on both
-platforms, so that crash is unreproduced and unexplained; a throw across an MSVC-compiled frame is
-untested (round 4); and the substratevm LLVM gate has not been run on this branch (round 3). The
-journal has the detail for each.
+platforms, so that crash is unreproduced and unexplained; and a throw across an MSVC-compiled frame
+is still untested - `complex`'s C code calls into the image and receives exceptions through JNI, but
+nothing throws *through* a frame the MSVC compiler emitted. The substratevm LLVM gate is no longer
+on this list: round 3 runs it (`graalvm-gate.yml`), and its `build,helloworld` tags pass on
+linux-amd64 ([35363511118](https://github.com/Throwaway68/gha-graal/actions/runs/35363511118)) and
+windows-amd64 ([35363499659](https://github.com/Throwaway68/gha-graal/actions/runs/35363499659)) at
+graal `54969a2cee8`; `hellomodule`'s `-H:+RuntimeClassLoading` variant remains blocked on every
+platform, because its interpreter stubs need multi-value returns and tail calls that the LLVM
+backend does not implement. The journal has the detail for each.
 
 JNI in both directions is covered by `tests/programs/complex` as of 2026-09-18 and is green on all
 three platforms - windows-amd64
@@ -205,10 +224,10 @@ That needs the image's export table, which the LLVM backend did not fill on PE/C
 `54969a2cee8`; since then it is green on windows-amd64
 ([35362529312](https://github.com/Throwaway68/gha-graal/actions/runs/35362529312)) and linux-amd64
 ([35362537233](https://github.com/Throwaway68/gha-graal/actions/runs/35362537233)). It is a
-separate program so that `complex` stays identical on every platform. On **darwin-aarch64 it has
-not run in CI at all** yet - only locally, and there with the stock backend rather than the LLVM
-one; the round 4 release's smoke test is its first run on that platform (this paragraph is updated
-with the result once that release exists).
+separate program so that `complex` stays identical on every platform. On darwin-aarch64 it had never
+run in CI until the round 4 release's smoke test, where it was green on the first try
+([35365165424](https://github.com/Throwaway68/gha-graal/actions/runs/35365165424)): Mach-O needs no
+equivalent of the PE/COFF fix, so all three platforms now resolve an image's `@CEntryPoint` by name.
 
 On darwin-aarch64 the backend works as of 2026-09-18: `hello` prints
 `Hello from the LLVM backend on Mac OS X` and `DEV-RUN OK`
@@ -230,10 +249,11 @@ work on exceptions, GC or threads. It took four fixes, all in
   `__LLVM_STACKMAPS,__llvm_stackmaps` on Mach-O; with the bare section name it removes nothing and
   still exits 0, and 4.8 MB of stack maps went into every image.
 
-All four are toolchain-invocation fixes, not code generation. Releases `graalvm-round1-win-llvm`
-and `graalvm-round2-win-llvm` still carry linux-amd64 and windows-amd64 only, because they were
-built before this, and `tests/programs/overflow` (which fails on the other two platforms) has not
-been tried on darwin. The journal has a Finding per fix.
+All four are toolchain-invocation fixes, not code generation. Releases `graalvm-round1-win-llvm` and
+`graalvm-round2-win-llvm` carry linux-amd64 and windows-amd64 only, because they were built before
+this; `graalvm-round4-win-llvm` is the first to carry a darwin-aarch64 bundle. `tests/programs/overflow`
+(which fails on the other two platforms) has still not been tried on darwin. The journal has a
+Finding per fix.
 
 The backend's tool macro sets the experimental `-H:CompilerBackend=llvm` option, so use
 `native-image -H:+UnlockExperimentalVMOptions --tool:llvm-backend ...` (or leave
