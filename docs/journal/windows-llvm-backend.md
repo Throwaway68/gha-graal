@@ -124,6 +124,40 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `llvm-22.1.8-graal.2` is untouched. This is the release the branch consumes from now on and the
   default of `graalvm-dev.yml`.
 
+- 2026-09-17: **Round 1 release `graalvm-round1-win-llvm`**
+  (https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round1-win-llvm, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35290879456), built by `graalvm.yml` from
+  `graal/25.3.4.1-win-llvm` (head `fea81ecaff4`) against `llvm-22.1.8-graal.3`, with the full
+  `ce-llvm-ci` GraalVM (CE base, LLVM.org toolchain, Sulong, toolchain launchers, LLVM backend).
+  Three assets: `graalvm-round1-win-llvm-linux-amd64.tar.gz` (1,166,396,214 B),
+  `graalvm-round1-win-llvm-windows-amd64.zip` (1,675,262,796 B), `manifest.json` (sha512 of both).
+  Per-platform smoke (`scripts/graalvm/smoke.sh`: java, native-image, `lli`, a C hello world
+  through the bundled toolchain, then `native-image --tool:llvm-backend`):
+
+  - **windows-amd64 green** (job 36m10s, the image builds in 1m28s to
+    `D:\a\gha-graal\gha-graal\smoke\hello-llvm.exe (executable, 7.14MiB)`):
+
+    ```
+    == Native Image LLVM backend
+    ...
+    Finished generating 'hello-llvm' in 1m 28s.
+    Hello from the LLVM backend
+    LLVM backend: tested
+    SMOKE OK
+    ```
+
+  - **linux-amd64 green** (job 29m18s): same `Hello from the LLVM backend` / `LLVM backend: tested`
+    / `SMOKE OK`.
+  - **darwin-aarch64 is not in this release.** The first attempt with all three platforms
+    (run https://github.com/Throwaway68/gha-graal/actions/runs/35288617506) had windows-amd64
+    (36m06s) and linux-amd64 (29m) green with exactly those lines, and darwin-aarch64 failing in
+    the smoke test's backend step (finding below); one failed matrix job skips the release job, so
+    the release was rebuilt with `platforms=linux-amd64,windows-amd64`.
+
+  The release job took 1m46s with the task-8 hardening ported from `llvm.yml`: draft release, each
+  asset uploaded on its own (all three succeeded on attempt 1/6), verified by published size and
+  `state == uploaded`, then `gh release edit --draft=false`.
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -733,6 +767,29 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   burn the job's 240-minute budget. Debugging a Windows runner interactively means starting tmate
   by hand from MSYS2 in a `run:` step; nobody has done that yet. This supersedes the "runs after
   `dev-run`" wording of the entry above for windows-amd64.
+
+- 2026-09-17 (task 9, release run https://github.com/Throwaway68/gha-graal/actions/runs/35288617506):
+  **darwin-aarch64 fails in the smoke test's LLVM backend step, and not over the frame-record
+  option.** The full CE build (`ce-llvm-ci`) succeeds on macos-14 and `java`, `native-image`, `lli`
+  and the Sulong C hello world all pass; `native-image --tool:llvm-backend` then gets through
+  `[7/8] Laying out methods` and dies when `llc` rejects the batches (job 23:50:53 -> 00:17:46,
+  26m53s; the backend step itself is 47.2s):
+
+  ```
+  > com.oracle.graal.pointsto.util.ParallelExecutionException: LLVM compilation failed for batch 1 (f1000-f2000). Use -H:LLVMMaxFunctionsPerBatch=1 to compile each method individually. (/var/folders/.../SVM-15247345571989107718/llvm/b1o.bc): 1
+  Command: llc -relocation-model=pic --trap-unreachable -march=aarch64 --frame-pointer=all --aarch64-frame-record-on-top -O2 -filetype=obj -o b1.o b1o.bc
+  error: <unknown>:0:0: invalid register "x28" for llvm.read_register
+  error: <unknown>:0:0: invalid register "x27" for llvm.write_register
+  ```
+
+  (those two error lines repeat for every occurrence, hundreds of times). So `llc` accepts
+  `--aarch64-frame-record-on-top` - the correction above was right that the option exists - and what
+  it refuses is `llvm.read_register`/`llvm.write_register` on `x27` and `x28`, the registers
+  SubstrateVM reserves for the heap base and the thread pointer. LLVM only lets those intrinsics
+  name a register that is reserved for the target, so the missing piece is on the
+  `-mattr`/reserve-register side of the darwin invocation, not in the frame layout. **Open for round
+  2, not investigated here**; it cannot affect amd64, where the backend is green on both platforms.
+  Round 1's release is therefore built from linux-amd64 and windows-amd64 only.
 
 ## Decisions
 

@@ -15,7 +15,7 @@ linux-amd64, windows-amd64 and darwin-aarch64. Design: `docs/superpowers/specs/2
 
 ## Workflows
 
-**LLVM toolchain** (`llvm.yml`): `gh workflow run llvm.yml -f llvm_ref=graal/22.1.8 -f version=22.1.8-graal.2`.
+**LLVM toolchain** (`llvm.yml`): `gh workflow run llvm.yml -f llvm_ref=graal/22.1.8-win -f version=22.1.8-graal.3`.
 Publishes release `llvm-<version>` with `llvm-<version>-<platform>.tar.gz`,
 `compiler-rt-<version>-linux-amd64.tar.gz`, `llvm-src-<version>.tar.gz`,
 `llvm-lldonly-<version>-darwin-aarch64.tar.gz` and `manifest.json` (sha512). The release is
@@ -32,12 +32,16 @@ GraalVM-convention function on Win64 gets the Win64 argument registers but no 32
 C callers and every entry point with more than four arguments disagree about the fifth one. Nothing
 changes off Windows. The Windows LLVM backend needs that release.
 
-**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-ci -f llvm_release=llvm-22.1.8-graal.1`.
-Builds any graal ref against the LLVM release: graal's downloads from
-`lafo.ssw.uni-linz.ac.at/pub/llvm` are redirected with `MX_URLREWRITES`
-(pattern + digest override), so no suite file is edited. Publishes release
-`graalvm-<label>` with a `.tar.gz` per Unix platform, a `.zip` for Windows,
-and `manifest.json`.
+**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round1-win-llvm`
+(those two are also the defaults). Builds any graal ref against the LLVM release: graal's
+downloads from `lafo.ssw.uni-linz.ac.at/pub/llvm` are redirected with `MX_URLREWRITES`
+(pattern + digest override), so no suite file is edited. Every platform runs
+`scripts/graalvm/smoke.sh` (java, native-image, `lli`, a C hello world through the bundled
+toolchain, and a Java hello world with `--tool:llvm-backend` wherever the GraalVM carries
+`lib/svm/tools/llvm-backend`) before it packages. Publishes release `graalvm-<label>` with a
+`.tar.gz` per Unix platform, a `.zip` for Windows, and `manifest.json`, as a draft whose ~1 GB
+assets are uploaded one by one with retries and verified before the draft flag is cleared -
+the same hardening as `llvm.yml`, and for the same HTTP 500s.
 
 **GraalVM dev** (`graalvm-dev.yml`): `gh workflow run graalvm-dev.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f platform=windows-amd64 -f program=hello`.
 The iteration loop for the Windows backend port: one platform, no release. Builds the lean
@@ -63,6 +67,13 @@ com.oracle.svm.shadowed.org.bytedeco.{javacpp,llvm}.windows.x86_64` in
 `LLVM_PLATFORM_SPECIFIC_SHADOWED` / `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` windows-amd64
 entries point at those URLs. The relocation itself is `scripts/jars/shadow.py`.
 
+**Windows EH spike** (`spike-win-eh.yml`): `gh workflow run spike-win-eh.yml -f llvm_release=llvm-22.1.8-graal.3`.
+A standalone windows-2022 check of the assumptions the Windows backend rests on, from
+`tests/spike/win-eh/`: `llc` emits a Win64 `.xdata` LSDA for a custom personality, libunwind
+builds in SEH mode with the bundled clang, an MSVC-linked program unwinds through it, and the
+toolchain binaries start without an `.exe` suffix. No release and nothing depends on it; it is
+the evidence behind the design decisions recorded in the journal.
+
 ## Building your own branches
 
 1. Push a branch to `Throwaway68/graal` (any base). Run `graalvm.yml` with `graal_ref=<branch>`.
@@ -71,25 +82,37 @@ entries point at those URLs. The relocation itself is `scripts/jars/shadow.py`.
 2. To change LLVM, push a branch to `Throwaway68/llvm-project`, run `llvm.yml` with
    `llvm_ref=<branch>` and a new `version`, then pass that `llvm_release` to `graalvm.yml`.
 3. The Native Image LLVM backend is registered by `substratevm/mx.substratevm/mx_substratevm.py`
-   (`llvm_supported`, GR-34811). Windows has no backend code path yet; when a branch adds it,
-   drop the Windows exclusion there and the smoke test picks the backend up automatically
-   (it checks for `lib/svm/tools/llvm-backend`).
+   (`llvm_supported`). The smoke test picks it up automatically wherever the built GraalVM has
+   `lib/svm/tools/llvm-backend`.
+4. Branch plumbing: `graal/25.3.4.1-win-llvm` is the Windows backend branch and the default of
+   `graalvm.yml` and `graalvm-dev.yml`. It requires LLVM release `llvm-22.1.8-graal.3` or newer
+   (Win64 home space for `CallingConv::GRAAL` plus the Windows libunwind); with
+   `llvm-22.1.8-graal.2` the image still links, but a JNI entry point with more than four
+   arguments reads argument five 32 bytes low and the image faults. The
+   windows-amd64 JavaCPP/LLVM jars it points at come from release `jars-1.5.7-graal.1`.
+   `graal/25.3.4.1-ci` stays as it was, for comparing against the darwin-only change.
 
 ## Platform status (2026-09-17)
 
 | Platform | LLVM toolchain | Sulong (`lli`) | Native Image LLVM backend |
 |----------|----------------|----------------|---------------------------|
 | linux-amd64 | yes | yes | yes, smoke-tested (`--tool:llvm-backend`) |
-| windows-amd64 | yes | yes | no: the backend has no Windows code path (unwinding, partial link, objcopy) |
-| darwin-aarch64 | yes | yes | no: blocked by GR-34811 |
+| windows-amd64 | yes | yes | yes (round 1: hello world), smoke-tested on `graal/25.3.4.1-win-llvm` |
+| darwin-aarch64 | yes | yes | no: `llc` rejects the aarch64 batches |
 
-The `graal/25.3.4.1-ci` branch registers the backend on darwin-aarch64, but the image
-builder then aborts with "Unexpected image builder module-dependencies": in
-`substratevm/mx.substratevm/suite.py` the darwin/aarch64 entries of
-`LLVM_PLATFORM_SPECIFIC_SHADOWED` and `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` are the only
-ones without a `moduleName`, so those JavaCPP jars load as automatic modules. Making the
-macOS backend work needs modular (module-info) builds of those two jars for macosx-arm64.
-Releases are therefore built from the pristine `graal-25.3.4.1` tag.
+Round 1 on windows-amd64 means exactly what the smoke test shows: `native-image
+--tool:llvm-backend` builds a Java hello world and the image prints and exits 0. Exceptions unwind
+through libunwind in SEH mode, but nothing beyond a hello world has been run; see the journal for
+what each piece does. The build is published as
+[`graalvm-round1-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round1-win-llvm)
+(`graal/25.3.4.1-win-llvm` at `fea81ecaff4` against `llvm-22.1.8-graal.3`).
+
+On darwin-aarch64 the branch registers the backend as well - the module problem of
+`graal/25.3.4.1-ci` is gone, because this branch uses the stock `org.bytedeco` jars on every
+platform - but the smoke test still fails in the backend: `llc` refuses
+`llvm.read_register`/`llvm.write_register` on `x27` and `x28` (heap base and thread pointer), so
+no aarch64 batch compiles. That is open for round 2 and the reason release
+`graalvm-round1-win-llvm` carries linux-amd64 and windows-amd64 only.
 
 The backend's tool macro sets the experimental `-H:CompilerBackend=llvm` option, so use
 `native-image -H:+UnlockExperimentalVMOptions --tool:llvm-backend ...` (or leave
