@@ -42,3 +42,9 @@ tests/programs/excgc/expected.txt
 scripts/graalvm/smoke-stress.sh
 docs/superpowers/plans/2026-09-18-windows-llvm-backend-round3.md
 docs/superpowers/plans/2026-09-18-windows-llvm-backend-round4.md
+tests/programs/complex/Complex.java
+tests/programs/complex/complex.c
+tests/programs/complex/expected.txt
+tests/programs/complex/javac.flags
+tests/programs/complex/META-INF/native-image/gha-graal/complex/jni-config.json
+tests/programs/complex/META-INF/native-image/gha-graal/complex/native-image.properties

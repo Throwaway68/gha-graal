@@ -63,6 +63,23 @@ files, and saved right after the build so that a job failing at `dev-run` still 
 decides what to rebuild from file timestamps and a checkout stamps every source with the time of
 the run - the workflow comments and the journal have the numbers.
 
+**Program directories.** `tests/programs/<program>` is the contract `scripts/graalvm/dev-run.sh`
+implements, and it is the same one `scripts/graalvm/smoke-stress.sh` and the release smoke tests
+use. Required: the `*.java` sources, whose main class is the directory name capitalised (`hello` ->
+`Hello`), and `expected.txt`, every line of which must appear in the image's stdout. Optional, each
+one picked up by its mere presence:
+
+- `javac.flags` - one line of extra `javac` arguments, word-split (`complex` uses
+  `--add-modules org.graalvm.nativeimage`).
+- `META-INF/` - copied into the classpath, so `native-image` finds
+  `META-INF/native-image/<group>/<artifact>/jni-config.json` and `native-image.properties` by
+  itself and the program needs no arguments on the command line.
+- `*.c` - compiled by the **bundled** clang (`$GRAALVM_HOME/lib/llvm/bin/clang`), against the JNI
+  headers of the GraalVM under test, into one shared library named after the program
+  (`<work>/complex.dll`, `<work>/libcomplex.dylib`, `<work>/libcomplex.so`). The image is then run
+  with `-D<program>.lib=<absolute path>`, which is how `tests/programs/complex` knows what to
+  `System.load`.
+
 **Interactive session on the Windows runner.** `-f debug_ssh=true` stops the dev job after `dev-run`
 and opens a shell on the runner: tmate on linux/macOS, and on windows-amd64 the Windows OpenSSH
 server behind a cloudflared quick tunnel (`scripts/graalvm/win-ssh.ps1`), because tmate's action
@@ -167,9 +184,17 @@ What `stress` does **not** cover, and is therefore still open: `tests/programs/o
 backend bug rather than a Windows one; a caught exception inside an allocating eight-thread loop
 crashed the linux-amd64 image with stale references after the catch (run 35325689605) and was taken
 out of `stress`, and `tests/programs/excgc`, written to reproduce it single-threaded, passes on both
-platforms, so that crash is unreproduced and unexplained; JNI in both directions and a throw across an MSVC-compiled
-frame are untested (round 4); and the substratevm LLVM gate has not been run on this branch
-(round 3). The journal has the detail for each.
+platforms, so that crash is unreproduced and unexplained; a throw across an MSVC-compiled frame is
+untested (round 4); and the substratevm LLVM gate has not been run on this branch (round 3). The
+journal has the detail for each.
+
+JNI in both directions is covered by `tests/programs/complex` as of 2026-09-18 and is green on
+linux-amd64 (run https://github.com/Throwaway68/gha-graal/actions/runs/35355533926) and on
+darwin-aarch64 (run https://github.com/Throwaway68/gha-graal/actions/runs/35356407402): downcalls
+into a shared library the *bundled* clang builds on the runner, upcalls into the image including
+one whose Java side throws, a `ThrowNew` from C caught in Java, a `@CEntryPoint` entered from C
+through a function pointer, and the same traffic from six threads at once. windows-amd64 is round
+4's open platform.
 
 On darwin-aarch64 the backend works as of 2026-09-18: `hello` prints
 `Hello from the LLVM backend on Mac OS X` and `DEV-RUN OK`

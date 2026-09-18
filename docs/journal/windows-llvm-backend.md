@@ -368,6 +368,60 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   carries it (`graalvm.yml`'s own smoke test has never run the backend on macos-14), and
   `tests/programs/overflow`, which fails on the other two platforms, was not tried.
 
+- 2026-09-18: **`complex` - JNI in both directions - is green on linux-amd64 under the LLVM
+  backend, first try** (https://github.com/Throwaway68/gha-graal/actions/runs/35355533926, job
+  6m40s: build 4m14s, `dev-run` 1m11s, of which `native-image --tool:llvm-backend` is 1m06s;
+  graal `979f76f9073` on `graal/25.3.4.1-win-llvm`, `llvm-22.1.8-graal.3`):
+
+  ```
+  == javac
+  == clang (bundled)
+  == native-image (LLVM backend)
+  Finished generating 'app' in 1m 6s.
+  Complex on Linux, image=true
+  OK jni-add
+  OK jni-string
+  OK jni-array
+  OK jni-upcall
+  OK jni-upcall-string
+  OK jni-upcall-throw
+  OK jni-native-throw
+  OK centrypoint-pointer
+  OK jni-threads
+  OK records-sealed-switch
+  OK regex
+  OK streams-format
+  OK bigint
+  OK file-io
+  OK reflection
+  OK collectors
+  COMPLEX OK
+  DEV-RUN OK
+  ```
+
+  What the sixteen checks cover, against a `libcomplex.so` built on the runner by the *bundled*
+  clang from `tests/programs/complex/complex.c`: JNI downcalls (int arithmetic, `GetStringUTFChars`
+  /`NewStringUTF`, `GetIntArrayElements` over 1000 elements), JNI upcalls to static Java methods
+  (`CallStaticIntMethod`, `CallStaticObjectMethod`), an upcall whose Java side throws, where the
+  native code has to see the pending exception with `ExceptionCheck`, clear it, and recognise it
+  with `FindClass`/`IsInstanceOf`, a `ThrowNew` from native code caught in Java, a `@CEntryPoint`
+  entered from C through a `CEntryPointLiteral` function pointer with six arguments (the shape that
+  broke on the Win64 home space in round 1), the same JNI traffic from six threads at once with
+  an upcall and a caught native exception in each of 200 iterations, and a spread of ordinary
+  library code (records + sealed interface + pattern switch, regex, parallel streams, BigInteger,
+  temp-file I/O, `Method.invoke`, collectors). Configuration needed for it: a `jni-config.json` for
+  the three upcall targets plus `IllegalStateException.<init>(String)` and `RuntimeException`, and
+  `--initialize-at-build-time=Complex` - nothing else, in particular no `reflect-config.json`
+  (`getDeclaredMethod("square", int.class)` with constant arguments is folded by the analysis).
+
+  **darwin-aarch64 is green too**, at the same graal commit, after one `dev-run.sh` fix that has
+  nothing to do with the backend (the bundled clang's missing macOS sysroot - Finding below): run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35356407402 (job 8m51s: build 5m55s,
+  `dev-run` 1m38s, `app` in 1m30s), same sixteen checks, `Complex on Mac OS X, image=true`,
+  `COMPLEX OK`, `DEV-RUN OK`. The first darwin attempt,
+  https://github.com/Throwaway68/gha-graal/actions/runs/35355589921, is the one that failed in
+  `clang`. windows-amd64 is task 2's job.
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -1409,6 +1463,65 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   a failure is in a toolchain invocation rather than in the builder.
 
 
+- 2026-09-18 (task 1): **`dev-run.sh`'s program-directory contract grew three optional parts**, all
+  driven by the mere presence of a file, so that a program stays a self-contained directory and no
+  caller (the dev workflow, `smoke-stress.sh`, the release smoke test) has to learn about it:
+  `javac.flags` (one line, word-split, appended to `javac`), `META-INF/` (copied into
+  `$W/classes`, which is how `native-image` finds `jni-config.json` and `native-image.properties`
+  by itself), and `*.c` (compiled by `$H/lib/llvm/bin/clang` against `$H/include` into one shared
+  library named after the program, with the image then run as `app -D<name>.lib=<abs path>`).
+  Building the JNI library with the *bundled* clang rather than the platform compiler is the point
+  on Windows, where the whole question is whether that toolchain produces something the image can
+  load and call.
+
+  Two bash constraints the implementation has to respect: macOS's `/bin/bash` is 3.2, where
+  `"${arr[@]}"` on an *empty* array is an unbound-variable error under `set -u`, so every array
+  expansion uses `${arr[@]+"${arr[@]}"}` - the empty case is every program without a `*.c` file,
+  i.e. all of `hello`, `stress`, `overflow`, `excgc`; and `$JFLAGS` is deliberately unquoted,
+  because `javac.flags` holds a command line rather than one argument.
+
+- 2026-09-18 (task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35355589921):
+  **the bundled clang has no macOS sysroot, so nothing that includes a C library header compiles
+  on darwin without `-isysroot`.** The first darwin run of `complex` died two seconds into
+  `dev-run`:
+
+  ```
+  == clang (bundled)
+  .../Contents/Home/include/jni.h:39:10: fatal error: 'stdio.h' file not found
+  ```
+
+  Apple's own clang asks `xcrun` for the SDK and bakes the path in at build time; the LLVM.org
+  clang in `lib/llvm/bin` does not, and `jni.h` includes `<stdio.h>` on line 39. `dev-run.sh`'s
+  Darwin branch now adds `-isysroot $(xcrun --show-sdk-path)`, skipped when `xcrun` is absent. The
+  same class of difference as the four darwin fixes of the previous round: the toolchain
+  *invocation*, not the code.
+
+- 2026-09-18 (task 1, verified locally on a stock GraalVM CE 25): **a `CEntryPointLiteral` needs
+  its holder class initialized at build time.** `CEntryPointLiteral.create` is
+  `@Platforms(Platform.HOSTED_ONLY.class)`, so it has to run in the image generator. With the
+  default policy the analysis reaches `Complex.<clinit>` as runtime code and the build fails with
+
+  ```
+  UnsupportedPlatformException: Method org.graalvm.nativeimage.c.function.CEntryPointLiteral.create(Class, String, Class[]) is not available in this platform.
+  ```
+
+  Hence `META-INF/native-image/gha-graal/complex/native-image.properties` with
+  `Args = --initialize-at-build-time=Complex`. It lives next to the `jni-config.json` rather than
+  in the dev workflow's `ni_args`, so every caller of the program directory gets it for free. The
+  mirror image on the HotSpot side is `getFunctionPointer()`, which is image-*runtime*-only and
+  throws `IllegalStateException: Cannot invoke method during native image generation` on a JVM: the
+  static field therefore holds the literal, and the pointer is taken inside the
+  `ImageInfo.inImageRuntimeCode()` branch.
+
+- 2026-09-18 (task 1, HotSpot verification): two defects in the plan's draft of `Complex.java`,
+  both caught before any CI run by building `libcomplex.dylib` with Apple's `cc` and running the
+  program on the local GraalVM CE 25. `getFunctionPointer()` in the class initializer (see above)
+  killed the program before the first check; and `50! mod 97 == 0` is arithmetically impossible -
+  97 is prime and larger than 50, so it divides none of the factors - the residue is 65. Running
+  the program on HotSpot *and* as a native image with the stock default backend, before spending a
+  workflow run, cost about five minutes and caught three of the four problems this task had
+  (the fourth, the macOS sysroot, only exists for the bundled toolchain).
+
 ## Decisions
 
 - 2026-09-17 (controller ruling, task 6): **this branch uses the stock `org.bytedeco` jars from
@@ -1499,6 +1612,17 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   and tasks 3 and 4 need a baseline that is green on the platform where the backend is meant to be
   known-good. The two findings above are the record of what was removed and why.
 
+
+- 2026-09-18 (task 1): **native code reaches the image through a `CEntryPointLiteral` function
+  pointer and through JNI upcalls, never through an exported `@CEntryPoint` symbol.** An export
+  needs the *defining* object to carry a `/EXPORT:` directive on Windows, and the LLVM backend
+  emits none - `LLVMNativeImageCodeCache.defineMethodSymbol` only creates undefined symbols in the
+  image object, and nothing sets dllexport in the IR. A program built around
+  `GetProcAddress("entry")` would therefore fail on windows-amd64 for a reason that has nothing to
+  do with what round 4 is testing (JNI in both directions), and would hide every check after it.
+  A function pointer handed to C as a `jlong` needs no symbol at all, and JNI upcalls go through
+  `JNIFunctions`, which is entered from the JNI trampoline rather than from the export table. The
+  exported-symbol path stays a round-3 question (`cinterfacetutorial --shared`).
 
 ## Dead ends
 
