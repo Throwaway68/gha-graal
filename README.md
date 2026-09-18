@@ -11,7 +11,7 @@ linux-amd64, windows-amd64 and darwin-aarch64. Design: `docs/superpowers/specs/2
 | `Throwaway68/llvm-project` | `graal/22.1.8` | llvmorg-22.1.8 + the four patches from graal's `sdk/llvm-patches` |
 | `Throwaway68/llvm-project` | `graal/22.1.8-win` | the above + `CallingConv::GRAAL` is Win64 on Windows (see below) |
 | `Throwaway68/graal` | `graal/25.3.4.1-ci` | graal-25.3.4.1 + LLVM backend registered on darwin-aarch64 |
-| `Throwaway68/graal` | `graal/25.3.4.1-win-llvm` | graal-25.3.4.1 + the Native Image LLVM backend on windows-amd64 (hello world green, see the journal) |
+| `Throwaway68/graal` | `graal/25.3.4.1-win-llvm` | graal-25.3.4.1 + the Native Image LLVM backend on windows-amd64 and darwin-aarch64 (see the journal) |
 
 ## Workflows
 
@@ -35,8 +35,9 @@ C callers and every entry point with more than four arguments disagree about the
 changes off Windows. The Windows LLVM backend needs that release.
 
 **GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round2-win-llvm -f platforms=linux-amd64,windows-amd64`
-(the first two are also the defaults; `platforms` must exclude darwin-aarch64 for now, see the
-platform status below). Builds any graal ref against the LLVM release: graal's
+(the first two are also the defaults; `platforms` has excluded darwin-aarch64 up to and including
+the round 2 release - the backend works there since 2026-09-18 but no release has been built with it
+yet, see the platform status below). Builds any graal ref against the LLVM release: graal's
 downloads from `lafo.ssw.uni-linz.ac.at/pub/llvm` are redirected with `MX_URLREWRITES`
 (pattern + digest override), so no suite file is edited. Every platform runs
 `scripts/graalvm/smoke.sh` (java, native-image, `lli`, a C hello world through the bundled
@@ -90,6 +91,13 @@ at most. If `cloudflared` answers `lookup ... no such host`, your resolver filte
 run the client in a container: `-o ProxyCommand="docker run -i --rm --dns 8.8.8.8
 cloudflare/cloudflared access tcp --hostname %h"`.
 
+The tmate side is not reliable on macos-14: in run 35345568476 the `mxschmitt/action-tmate` step sat
+there for 25 minutes without ever publishing an address and the run had to be cancelled. When a
+darwin failure is in a toolchain invocation rather than in the builder there is a faster route than
+a session anyway - download that platform's LLVM release asset and the `dev-<platform>-<program>`
+artifact of the failed run (it carries `work/tmp/**/llvm/*.o`, the real batch objects) and reproduce
+the step locally. That is how three of the four darwin fixes were found; see the journal.
+
 **Shadowed jars** (`jars.yml`): `gh workflow run jars.yml -f version=1.5.7-graal.1`.
 Rebuilds the JavaCPP 1.5.7 and LLVM 13.0.1-1.5.7 **windows-x86_64** platform jars from
 Maven Central as graal-style *shadowed* jars (`org.bytedeco` relocated to
@@ -133,7 +141,7 @@ the evidence behind the design decisions recorded in the journal.
 |----------|----------------|----------------|---------------------------|
 | linux-amd64 | yes | yes | yes (round 2: exceptions, GC, threads), smoke-tested (`--tool:llvm-backend`) |
 | windows-amd64 | yes | yes | yes (round 2: exceptions, GC, threads), smoke-tested on `graal/25.3.4.1-win-llvm` |
-| darwin-aarch64 | yes | yes | no: `llc` rejects the aarch64 batches |
+| darwin-aarch64 | yes | yes | yes (round 2: exceptions, GC, threads) on `graal/25.3.4.1-win-llvm`; `graalvm.yml`'s own smoke test has not been run there yet |
 
 Releases of the Windows backend branch, newest first:
 
@@ -163,15 +171,30 @@ platforms, so that crash is unreproduced and unexplained; JNI in both directions
 frame are untested (round 4); and the substratevm LLVM gate has not been run on this branch
 (round 3). The journal has the detail for each.
 
-On darwin-aarch64 the branch registers the backend as well - the module problem of
-`graal/25.3.4.1-ci` is gone, because this branch uses the stock `org.bytedeco` jars on every
-platform - but the smoke test still fails in the backend: `llc` refuses
-`llvm.read_register`/`llvm.write_register` on `x27` and `x28` (heap base and thread pointer), so
-no aarch64 batch compiles. It was out of scope for round 2 (Windows only) and is the reason
-releases `graalvm-round1-win-llvm` and `graalvm-round2-win-llvm` carry linux-amd64 and
-windows-amd64 only. Until it is fixed, a release build has to be started with
-`-f platforms=linux-amd64,windows-amd64`: the release job needs every matrix job, so one failing
-darwin job means no release at all.
+On darwin-aarch64 the backend works as of 2026-09-18: `hello` prints
+`Hello from the LLVM backend on Mac OS X` and `DEV-RUN OK`
+(run https://github.com/Throwaway68/gha-graal/actions/runs/35347138049), and `stress` - the same
+eleven checks that define round 2 on the other two platforms - is green there on the first try
+(run https://github.com/Throwaway68/gha-graal/actions/runs/35347790516), with no darwin-specific
+work on exceptions, GC or threads. It took four fixes, all in
+`substratevm/src/com.oracle.svm.core.graal.llvm/`, one graal commit each:
+
+- `bc99e7129b9` - `llc` refused `llvm.read_register`/`llvm.write_register` on `x27` and `x28` (heap
+  base and thread pointer) because nothing reserved them, so no aarch64 batch compiled;
+  `-mattr=+reserve-x27,+reserve-x28`. Not darwin-specific - linux-aarch64 would hit it too.
+- `a6914a70208` - `ld64.lld` does not implement `-r`, so the relocatable link of the compiled
+  batches runs the platform linker (`ld -r`) instead.
+- `ac778fbcab5` - `llvm-objcopy --add-symbol` is ELF only, so `__svm_code_section` and
+  `__svm_text_end` come from two marker objects that bracket the batches in the input order of that
+  link, checked against the linked object afterwards.
+- `6dfc22e0897` - `llvm-objcopy --remove-section` needs the canonical
+  `__LLVM_STACKMAPS,__llvm_stackmaps` on Mach-O; with the bare section name it removes nothing and
+  still exits 0, and 4.8 MB of stack maps went into every image.
+
+All four are toolchain-invocation fixes, not code generation. Releases `graalvm-round1-win-llvm`
+and `graalvm-round2-win-llvm` still carry linux-amd64 and windows-amd64 only, because they were
+built before this, and `tests/programs/overflow` (which fails on the other two platforms) has not
+been tried on darwin. The journal has a Finding per fix.
 
 The backend's tool macro sets the experimental `-H:CompilerBackend=llvm` option, so use
 `native-image -H:+UnlockExperimentalVMOptions --tool:llvm-backend ...` (or leave

@@ -293,12 +293,80 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
     references live across an invoke are not reported to the GC on the unwind edge - is still
     neither confirmed nor refuted. A threaded reproducer is the obvious next try. Also untested
     against stock upstream graal.
-  - *darwin-aarch64 stays out of the release.* `llc` rejects `llvm.read_register` /
+  - ~~*darwin-aarch64 stays out of the release.* `llc` rejects `llvm.read_register` /
     `llvm.write_register` on `x27`/`x28`, so no aarch64 batch compiles; out of scope for round 2,
-    which was Windows only.
+    which was Windows only.~~ **Fixed - see the milestone "darwin-aarch64 builds and runs a hello
+    world with the LLVM backend" (2026-09-18) below and its four Findings. `-mattr` reserves the two
+    registers; three Mach-O toolchain differences came out behind that.**
   - *A large-frame method that actually emits `__chkstk`* has still not been built, so the
     msvc/mingw stack-probe question remains theoretical (no probe symbol appears in any image so
     far).
+
+- 2026-09-18: **the LLVM backend works on darwin-aarch64, and `stress` is green there on the first
+  try** (graal `bc99e7129b9`, `a6914a70208`, `ac778fbcab5`, `6dfc22e0897` on
+  `graal/25.3.4.1-win-llvm`). `hello`:
+  https://github.com/Throwaway68/gha-graal/actions/runs/35347138049 (job 6m33s: build 4m48s,
+  `dev-run` 42s, of which `native-image --tool:llvm-backend` is 38.2s):
+
+  ```
+  == native-image (LLVM backend)
+  Finished generating 'app' in 38.2s.
+  Hello from the LLVM backend on Mac OS X
+  DEV-RUN OK
+  ```
+
+  `stress`: https://github.com/Throwaway68/gha-graal/actions/runs/35347790516 (build 6m14s,
+  `dev-run` 48s, `app` in 41.5s), all eleven checks, no darwin-specific fix needed for any of them:
+
+  ```
+  Stress on Mac OS X, 3 cpus
+  deep frames in trace: 61
+  OK throw-catch-deep
+  OK implicit-exceptions
+  OK rethrow-wrap
+  OK finally-order
+  OK gc-live-frames
+  OK gc-weakref
+  OK gc-pressure
+  OK threads-basic
+  OK threads-gc
+  OK threads-wait-notify
+  OK thread-exceptions
+  STRESS OK
+  DEV-RUN OK
+  ```
+
+  So darwin-aarch64 arrives at round 2 level directly: exceptions through `__eh_frame` /
+  `__compact_unwind` and the Itanium personality out of libSystem, garbage collections taken through
+  live frames, and threads, all work without anything like the Windows SEH shim or the statepoint
+  padding correction. The four fixes below are all in the *toolchain invocations*, not in code
+  generation - which is what one would hope for a platform LLVM has always supported and whose
+  unwinding protocol the backend was written for.
+
+  No regression elsewhere at the same commit: windows-amd64 `hello`
+  https://github.com/Throwaway68/gha-graal/actions/runs/35347527209 and linux-amd64 `hello`
+  https://github.com/Throwaway68/gha-graal/actions/runs/35347538336 are both green.
+
+  Four root causes, one commit each, all in
+  `substratevm/src/com.oracle.svm.core.graal.llvm/`, each with a Finding below:
+
+  | commit | what was broken |
+  |--------|-----------------|
+  | `bc99e7129b9` | `llc` rejects `llvm.read_register`/`llvm.write_register` on `x27`/`x28` unless something reserves them; nothing did. `-mattr=+reserve-x27,+reserve-x28` |
+  | `a6914a70208` | `ld64.lld` does not implement `-r`; the relocatable link runs the platform linker |
+  | `ac778fbcab5` | `llvm-objcopy --add-symbol` is ELF only; `__svm_code_section`/`__svm_text_end` come from two marker objects that bracket the batches |
+  | `6dfc22e0897` | `--remove-section` needs the canonical `__LLVM_STACKMAPS,__llvm_stackmaps` on Mach-O, and removes nothing, silently, without it |
+
+  `llvm.o` of the `hello` run, read from the `dev-darwin-aarch64-hello` artifact with the same LLVM
+  22.1.8-graal.3 tools: 5,584,848 bytes, Mach-O arm64, `__text` 0x252994 with `___svm_code_section`
+  at 0 and `___svm_text_end` at 0x252994, plus `__gcc_except_tab`, `__literal8`, `__const`,
+  `__eh_frame` and `__compact_unwind`, and no `__llvm_stackmaps` left.
+
+  Only the first of the four needed a runner. The other three were found and fixed on the
+  development Mac from the darwin-aarch64 LLVM release asset plus the `b*.o` batch objects of the
+  failed run 35344809896 - see the methodology Finding below. Still open for darwin: no release
+  carries it (`graalvm.yml`'s own smoke test has never run the backend on macos-14), and
+  `tests/programs/overflow`, which fails on the other two platforms, was not tried.
 
 ## Findings
 
@@ -944,9 +1012,11 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   it refuses is `llvm.read_register`/`llvm.write_register` on `x27` and `x28`, the registers
   SubstrateVM reserves for the heap base and the thread pointer. LLVM only lets those intrinsics
   name a register that is reserved for the target, so the missing piece is on the
-  `-mattr`/reserve-register side of the darwin invocation, not in the frame layout. **Open for round
-  2, not investigated here**; it cannot affect amd64, where the backend is green on both platforms.
-  Round 1's release is therefore built from linux-amd64 and windows-amd64 only.
+  `-mattr`/reserve-register side of the darwin invocation, not in the frame layout. ~~**Open for
+  round 2, not investigated here**~~ - **fixed in graal `bc99e7129b9`; the reading above was right,
+  see the Finding "`llc` rejects `llvm.read_register` on `x27`/`x28` because nothing reserves them"
+  (2026-09-18) for which code decides it.** It cannot affect amd64, where the backend is green on
+  both platforms. Round 1's release is therefore built from linux-amd64 and windows-amd64 only.
 
 - 2026-09-17 (final review, no run): **what round 2 should verify.** Round 1's evidence comes from
   `hello` plus offline reads of `llvm.obj`, which leaves these open, each cheap to run through
@@ -959,8 +1029,9 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   - a **large-frame method** (a frame bigger than a page) so `__chkstk` is actually emitted and the
     msvc/mingw stack-probe question stops being theoretical - see the `__chkstk` finding above, where
     zero probe symbols appear in `hello`.
-  - the darwin **`x27`/`x28` reserved-register rejection** in `llc` (the task 9 finding above), which
-    is what keeps darwin-aarch64 out of the release.
+  - ~~the darwin **`x27`/`x28` reserved-register rejection** in `llc` (the task 9 finding above), which
+    is what keeps darwin-aarch64 out of the release.~~ **Done (2026-09-18): graal `bc99e7129b9`, and
+    darwin-aarch64 runs a hello world - see the milestone and Findings of the darwin round.**
   - **JNI wrappers in plain `.text`**: they sit outside `[__svm_code_section, __svm_text_end)` by
     design; a program that stack-walks from inside a wrapper would confirm the reasoning empirically.
   - the Windows native-image **"2 warnings"** nobody has read yet: retrieve them from a
@@ -1273,6 +1344,70 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   is corrected in place, where it used to say that in a method with more than one call the shift is
   silent and worse than a crash.
 
+- 2026-09-18 (darwin round, graal `bc99e7129b9`, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35344809896): **`llc` rejects
+  `llvm.read_register` on `x27`/`x28` because nothing reserves them, and `-mattr` is what reserves
+  them.** `AArch64TargetLowering::getRegisterByName` (fork `AArch64ISelLowering.cpp:12882`) accepts
+  `x1`-`x28` for those intrinsics only when the register is reserved in the machine function. Two
+  things reserve `x27`/`x28` on AArch64: the GRAAL calling convention
+  (`AArch64RegisterInfo.cpp:495`), and the subtarget features `+reserve-x27`/`+reserve-x28`. The
+  backend uses neither - `LLVMIRBuilder.LLVMCallingConvention.value()` maps
+  `GraalCallingConvention` to the C convention on AARCH64 (since `edfe98c4656` "Restore LLVM backend
+  on LLVM 20", which gives no reason), and `llc` was invoked with no `-mattr`. So every batch failed.
+  `getLLCAdditionalOptions` on AArch64 now passes `-mattr=+reserve-x27,+reserve-x28`, which both
+  makes the intrinsics legal and keeps the register allocator off the heap base and the thread
+  register in every function - what SubstrateVM needs anyway. This is not darwin-specific;
+  linux-aarch64 would fail the same way.
+
+- 2026-09-18 (darwin round, graal `a6914a70208`, local reproduction from the objects of run
+  35344809896): **`ld64.lld` does not implement `-r`.** The Mach-O driver treats it as an
+  unimplemented option - "ld64.lld: warning: Option `-r' is not yet implemented. Stay tuned..." -
+  and links an executable, which then dies on the first image-heap symbol a batch references
+  (`undefined symbol: _constant_Hello_main_...#13`). What the first run saw instead was
+  `must specify -arch`, and after that `must specify -platform_version`, because
+  `createTargetInfo`/`setPlatformVersions` (lld/MachO/Driver.cpp:942 and :905) run before any input
+  file is read and take neither from the inputs; supplying both only gets far enough to see that
+  `-r` is ignored. The LLVM toolchain bundle has no other Mach-O linker, so `nativeLink` runs the
+  platform linker on Darwin: `ld -r -o llvm.o b*.o`, no other flags - `ld` takes the architecture
+  from its inputs. It is the same linker the image build already needs for its final link. On the
+  six batch objects of `hello` it takes 0.07 s and produces a 10.6 MB relocatable object whose
+  `__TEXT,__text` is 0x252994 bytes and holds all 5,137 functions.
+
+- 2026-09-18 (darwin round, graal `ac778fbcab5`, same reproduction): **`llvm-objcopy --add-symbol`
+  is ELF only ("option is not supported for MachO"), so the code section boundary symbols come from
+  two marker objects.** On ELF the backend stamps `__svm_code_section` and `__svm_text_end` into the
+  linked object afterwards; on Mach-O objcopy refuses. Windows solves the same problem with grouped
+  COFF sections (`.text$svm0` / `.text$svm2`), which Mach-O does not have - but on Mach-O the
+  backend owns the *input order* of the relocatable link, and `ld -r` concatenates the
+  `__TEXT,__text` of its inputs in that order. So `linkCompiledBatches` compiles two marker objects,
+  each nothing but module-level inline assembly with one global label in `__TEXT,__text`, and links
+  them as the first and the last input. Measured: `__text` is 0x252994 bytes with and without the
+  markers, `___svm_code_section` is at 0 and `___svm_text_end` at 0x252994, so the pair brackets the
+  code exactly and adds no padding (the markers carry no `.p2align`, so their empty sections can
+  never round the section size up). Input order is not something the format promises and getting it
+  wrong would shift every method offset rather than fail the build, so both markers are checked
+  against the linked object before it is used; the check needs
+  `LLVMTextSectionInfo.getSymbolOffset`, because the ordinary method lookup drops symbols at
+  `offset == codeSize`, which is exactly where the end marker sits.
+
+- 2026-09-18 (darwin round, graal `6dfc22e0897`, same reproduction): **`llvm-objcopy
+  --remove-section` needs the canonical `SEGMENT,SECTION` name on Mach-O, and says nothing when it
+  does not get it.** `SectionName.LLVM_STACKMAPS.getFormatDependentName(MACH_O)` is
+  `__llvm_stackmaps`, but objcopy matches a Mach-O section by `Section::CanonicalName`, which is
+  `__LLVM_STACKMAPS,__llvm_stackmaps`. With the short name it exits 0, prints nothing and removes
+  nothing: 10,575,944 bytes before and after. With the canonical name the object drops to 5,584,776
+  bytes. The stack maps are half the linked object of a hello world, and all of it was going into
+  the image.
+
+- 2026-09-18 (darwin round, methodology): **the darwin runner was not needed for any of the three
+  Mach-O fixes.** The LLVM release asset `llvm-22.1.8-graal.3-darwin-aarch64.tar.gz` (740 MB) is the
+  same toolchain the runner uses, and the `dev-darwin-aarch64-hello` artifact of a failed run
+  carries the real `b*.o` batch objects (`work/tmp/**/llvm/*.o` is in the upload list). Downloaded
+  onto the development Mac, the two together reproduce everything the backend does after
+  `llc` - the relocatable link, `llvm-objcopy`, `llvm-nm`/`llvm-objdump` on the result - in seconds
+  instead of a 20-minute workflow round trip or a 45-minute tmate wait. Worth reaching for whenever
+  a failure is in a toolchain invocation rather than in the builder.
+
 
 ## Decisions
 
@@ -1397,3 +1532,17 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `addMainFunction` puts every function on the Graal calling convention. The frame was
   `JavaMainWrapper.run` only because it is one call long and that call sits in front of the
   epilogue.
+- 2026-09-18 (darwin round): **`-arch` and `-platform_version` do not make `ld64.lld -r` work.** The
+  first darwin link failure is `ld64.lld: error: must specify -arch`, and adding `-arch arm64
+  -platform_version macos 11.0 11.0` does get past that and past the `-platform_version` error
+  behind it. It is still a dead end: lld's Mach-O port has no `-r` at all, so with the flags
+  accepted it goes on to link an executable and fails on every image-heap symbol. Both messages come
+  out of `createTargetInfo`, before a single input is read, which is why the missing `-r` was
+  invisible until the flags were supplied.
+- 2026-09-18 (darwin round): **`llvm-objcopy --add-symbol` cannot add the boundary symbols on
+  Mach-O.** `--add-symbol=___svm_code_section=__text:0,global` fails with "option is not supported
+  for MachO" - the option is implemented for ELF only. Round 1's reference facts already said so;
+  this is the check against the real object.
+- 2026-09-18 (darwin round): **`--remove-section=__llvm_stackmaps` on Mach-O is not a no-op that
+  fails loudly, it is a no-op that succeeds.** Exit status 0, no output, object unchanged. Anything
+  that greps a build log for objcopy errors would have found nothing.
