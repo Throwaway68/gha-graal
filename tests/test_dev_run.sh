@@ -105,6 +105,11 @@ echo "$out" | grep -q 'DEV-RUN OK' || { echo "$out"; echo "FAIL: no DEV-RUN OK f
 grep -qE -- '-shared|-dynamiclib' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: clang not asked for a shared library"; exit 1; }
 grep -qF -- "-I$H4/include" "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: JNI headers of the GraalVM under test not on the clang command line"; exit 1; }
 grep -qE -- ' [^ ]*/x\.c ' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: the program's *.c not compiled"; exit 1; }
+# On macOS the bundled clang is an LLVM.org build without a default sysroot, so it must be given
+# one; nothing that includes <stdio.h> - jni.h does - compiles otherwise.
+if [ "$(uname -s)" = Darwin ]; then
+  grep -qF -- "-isysroot $(xcrun --show-sdk-path)" "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: no macOS sysroot on the clang command line"; exit 1; }
+fi
 grep -qE -- '-o [^ ]*/(lib)?x\.(so|dylib|dll)$' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: library not named after the program"; exit 1; }
 lib=$(sed -n 's/.* -o \(.*\)$/\1/p' "$CLANG_LOG"); [ -f "$lib" ] || { echo "FAIL: library $lib not produced"; exit 1; }
 grep -qF -- "app -Dx.lib=$lib" "$APP_LOG" || { cat "$APP_LOG"; echo "FAIL: the image was not run with -Dx.lib=<library>"; exit 1; }

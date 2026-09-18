@@ -61,7 +61,12 @@ if ls "$P"/*.c >/dev/null 2>&1; then
   CLANG=$(exe "$H/lib/llvm/bin" clang)
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*) lib="$W/$name.dll";      cflags=(--target=x86_64-pc-windows-msvc -fuse-ld=lld -shared "-I$H/include" "-I$H/include/win32");;
-    Darwin)               lib="$W/lib$name.dylib"; cflags=(-dynamiclib "-I$H/include" "-I$H/include/darwin");;
+    # macOS: the bundled clang is an LLVM.org build with no default sysroot - only Apple's own
+    # clang asks xcrun for one - so <stdio.h>, which jni.h includes, is not found without
+    # -isysroot (run 35355589921 failed exactly there).
+    Darwin)               lib="$W/lib$name.dylib"; cflags=(-dynamiclib "-I$H/include" "-I$H/include/darwin")
+                          sdk=$(xcrun --show-sdk-path 2>/dev/null) || sdk=""
+                          [ -n "$sdk" ] && cflags=("${cflags[@]}" -isysroot "$sdk");;
     *)                    lib="$W/lib$name.so";    cflags=(-shared -fPIC "-I$H/include" "-I$H/include/linux");;
   esac
   "$CLANG" -O1 ${cflags[@]+"${cflags[@]}"} "$P"/*.c -o "$lib"
