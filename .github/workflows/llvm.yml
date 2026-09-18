@@ -5,12 +5,12 @@ on:
     inputs:
       llvm_ref:
         description: 'Ref in Throwaway68/llvm-project to build'
-        default: 'graal/22.1.8'
+        default: 'graal/22.1.8-win'
         required: true
         type: string
       version:
-        description: 'Version label used in asset names; the release tag is llvm-<version>'
-        default: '22.1.8-graal.2'
+        description: 'Version label used in asset names; the release tag is llvm-<version>; bump for a new release - the defaults name the current one, so a default run stops at the "release already exists and is published" guard'
+        default: '22.1.8-graal.3'
         required: true
         type: string
       publish:

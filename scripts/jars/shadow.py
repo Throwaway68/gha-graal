@@ -12,6 +12,10 @@ where Oracle's linux/macOS shadowed jars carry theirs.
 
 Platform jars hold only native libraries, so relocating entry names is the whole
 job: there is no bytecode referencing org.bytedeco to rewrite.
+
+Retained for the record and superseded: the Windows LLVM backend branch uses the
+stock org.bytedeco jars on every platform (stock-jars decision, task 6, in
+docs/journal/windows-llvm-backend.md), so nothing consumes jars-1.5.7-graal.1.
 """
 import argparse
 import hashlib

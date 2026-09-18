@@ -5,7 +5,7 @@ on:
     inputs:
       llvm_release:
         description: 'LLVM release providing the Windows bundle and the source tarball'
-        default: 'llvm-22.1.8-graal.1'
+        default: 'llvm-22.1.8-graal.3'
         type: string
 
 permissions:

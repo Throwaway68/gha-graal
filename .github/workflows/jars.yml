@@ -1,10 +1,14 @@
+# Retained for the record, and superseded: the Windows LLVM backend branch uses the stock
+# org.bytedeco jars from Maven Central on every platform (stock-jars decision, task 6, in
+# docs/journal/windows-llvm-backend.md), so nothing consumes the release jars-1.5.7-graal.1
+# this workflow produced. Kept published as the record of what was tried.
 name: Shadowed jars
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release label; the release tag is jars-<version>'
+        description: 'Release label; the release tag is jars-<version>. Retained for the record only - the branch uses the stock org.bytedeco jars and nothing consumes jars-1.5.7-graal.1 (stock-jars decision, task 6, in docs/journal/windows-llvm-backend.md)'
         default: '1.5.7-graal.1'
         required: true
         type: string

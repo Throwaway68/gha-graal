@@ -16,6 +16,8 @@ linux-amd64, windows-amd64 and darwin-aarch64. Design: `docs/superpowers/specs/2
 ## Workflows
 
 **LLVM toolchain** (`llvm.yml`): `gh workflow run llvm.yml -f llvm_ref=graal/22.1.8-win -f version=22.1.8-graal.3`.
+Those two values are the workflow's defaults, i.e. the release the branch currently needs, so a run
+without inputs stops at the "already exists and is published" guard; bump `version` for a new release.
 Publishes release `llvm-<version>` with `llvm-<version>-<platform>.tar.gz`,
 `compiler-rt-<version>-linux-amd64.tar.gz`, `llvm-src-<version>.tar.gz`,
 `llvm-lldonly-<version>-darwin-aarch64.tar.gz` and `manifest.json` (sha512). The release is

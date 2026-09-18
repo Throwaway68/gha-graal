@@ -14,16 +14,22 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   (run https://github.com/Throwaway68/gha-graal/actions/runs/35212270484; the tag was rebuilt from
   run 35209720023 after the review fix below). Seven assets as in graal.1;
   `llvm-22.1.8-graal.2-windows-amd64.tar.gz` carries `lib/x86_64-w64-windows-gnu/libunwind.a`, the same
-  archive as `unwind.lib`, and `include/unwind.h`, and nothing loose at its root. This is the release
-  tasks 5 to 9 consume.
+  archive as `unwind.lib`, and `include/unwind.h`, and nothing loose at its root. ~~This is the release
+  tasks 5 to 9 consume.~~ **Superseded - see the milestone for LLVM release `llvm-22.1.8-graal.3`
+  below: tasks 5 to 7 consumed graal.2, but tasks 8 and 9 and the round-1 release consume
+  `llvm-22.1.8-graal.3`, which adds the Win64 home-space fix.**
 
-- 2026-09-17: Shadowed jars release `jars-1.5.7-graal.1`
+- 2026-09-17: ~~Shadowed jars release `jars-1.5.7-graal.1`
   (run https://github.com/Throwaway68/gha-graal/actions/runs/35215356056, green first try):
   `javacpp-shadowed-1.5.7-graal.1-windows-x86_64.jar`,
   `llvm-shadowed-13.0.1-1.5.7-graal.1-windows-x86_64.jar` and `manifest.json`, built by
   `.github/workflows/jars.yml` from the Maven Central windows-x86_64 platform jars with
   `scripts/jars/shadow.py`. Task 6 points suite.py's windows-amd64
-  `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` / `LLVM_PLATFORM_SPECIFIC_SHADOWED` at them.
+  `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` / `LLVM_PLATFORM_SPECIFIC_SHADOWED` at them.~~
+  **Superseded - see the stock-jars decision (2026-09-17, controller ruling, task 6) in Decisions
+  below. suite.py points every platform at the stock `org.bytedeco` Maven Central jars, so nothing
+  references `jars-1.5.7-graal.1`; the release, `jars.yml` and `shadow.py` stay as the record of what
+  was tried.**
 
 - 2026-09-17: Dev loop ready, validated on the pristine tag `graal-25.3.4.1`
   (`.github/workflows/graalvm-dev.yml` + `mx-env/ce-llvm-dev`, final shape in commit e93fe15):
@@ -254,9 +260,17 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   personality and `GCCExceptionTable` therefore need no change.
 - 2026-09-17 (research): Windows images are linked by `cl.exe ... /link ...` (`WindowsCCLinkerInvocation`),
   not by lld-link. `LLVMCCompilerInvoker` (clang) is only used with `-H:+UseLLVMDataSection`.
-- 2026-09-17 (research): `CallingConv::GRAAL` (107) on Win64 lowers arguments with `CC_X86_Win64_C`
+- 2026-09-17 (research): ~~`CallingConv::GRAAL` (107) on Win64 lowers arguments with `CC_X86_Win64_C`
   and allocates no 32-byte shadow area (`isCallingConvWin64` is false for it). Consistent on both sides
-  of Java-to-Java calls; C-ABI calls use the normal Win64 convention. Verified empirically in Task 8.
+  of Java-to-Java calls; C-ABI calls use the normal Win64 convention. Verified empirically in Task 8.~~
+  **Superseded - Task 8 found the opposite for the C-callable entry stubs: the missing 32-byte home
+  space makes every entry point with more than four arguments read argument five 32 bytes low (Win64
+  puts it at return address + 40), which is most of the JNI function table, and `hello` faulted there.
+  See the task 8 findings "the Graal calling convention is broken on Win64, and it is an LLVM bug",
+  "the obvious workaround does not exist" and "the Win64 home space, before and after the LLVM fix"
+  below, and the task 8 decision to patch LLVM (`isCallingConvWin64` now answers `isTargetWin64()` for
+  `CallingConv::GRAAL`, released as `llvm-22.1.8-graal.3`).** What still holds: argument *registers*
+  come from `CC_X86_Win64_C`, and C-ABI calls use the normal Win64 convention.
 - 2026-09-17 (research): `x86_64-w64-windows-gnu` emits `___chkstk_ms`; `x86_64-pc-windows-msvc` emits
   `__chkstk`. Java code targets the msvc triple; libunwind is compiled for the gnu triple (needed for
   `__SEH__`) and linked as a COFF archive.
@@ -337,9 +351,12 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   snapshots the regular files at the out dir's root before installing and fails if it added any. The
   republished bundle has 4080 entries and not one of them lives directly at the root.
 
-- 2026-09-17 (run https://github.com/Throwaway68/gha-graal/actions/runs/35215356056): **the windows-x86_64
+- 2026-09-17 (run https://github.com/Throwaway68/gha-graal/actions/runs/35215356056): ~~**the windows-x86_64
   shadowed jars, for Task 6 to paste into suite.py verbatim** (sizes 1338481 and 620008997 bytes; digests
-  re-verified after downloading the published assets):
+  re-verified after downloading the published assets):~~
+  **Superseded - see the stock-jars decision (2026-09-17, controller ruling, task 6) in Decisions below.
+  These URLs and digests never reached suite.py, which points every platform at the stock `org.bytedeco`
+  Maven Central jars; they stay here as the record of what `jars-1.5.7-graal.1` contains.**
   - https://github.com/Throwaway68/gha-graal/releases/download/jars-1.5.7-graal.1/javacpp-shadowed-1.5.7-graal.1-windows-x86_64.jar
     `sha512:bc5e04f8b80cea785b0b6b9c0824030e5aeed99d5ed5b8610d9a9b895eb0a957f16c0660d87db6193892d3b2882ee74b1d7ad32d963007ba0a313d01ba94ce61`
     module `com.oracle.svm.shadowed.org.bytedeco.javacpp.windows.x86_64`
@@ -447,12 +464,16 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `libjnijavacpp.dylib` shows 108 `Java_com_oracle_svm_shadowed_org_bytedeco_javacpp_*` exports and
   the shadowed `FindClass` strings, i.e. these were built the way the windows ones would have to
   be. So darwin-aarch64 is one re-manifested pair of jars away from a working LLVM backend, which
-  is a jar to publish rather than a source change; this branch therefore keeps
+  is a jar to publish rather than a source change; ~~this branch therefore keeps
   `llvm_supported = not (mx.is_darwin() and mx.get_arch() == "aarch64")` and leaves the two
   darwin/aarch64 suite.py entries byte-identical to upstream. With that, darwin-aarch64 is back to
   the pristine tag's behaviour: the GraalVM builds and `dev-run` stops at
   `Error: Unknown name in option specification: tool:llvm-backend` (exit 20), the same way the tag
-  behaves on Windows.
+  behaves on Windows.~~ **Superseded - the stock-jars decision (2026-09-17, controller ruling, task 6)
+  changed this: the branch has `llvm_supported = True` and points darwin-aarch64 at the stock
+  macosx-arm64 `org.bytedeco` jars too, so the backend is registered there and fails later, in `llc`
+  - see the finding "darwin-aarch64 is no longer blocked by its jars, it is blocked by our LLVM build"
+  below and the task 9 `x27`/`x28` finding at the end of this section.**
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35241867510,
   https://github.com/Throwaway68/gha-graal/actions/runs/35242758887 and
@@ -791,6 +812,24 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   2, not investigated here**; it cannot affect amd64, where the backend is green on both platforms.
   Round 1's release is therefore built from linux-amd64 and windows-amd64 only.
 
+- 2026-09-17 (final review, no run): **what round 2 should verify.** Round 1's evidence comes from
+  `hello` plus offline reads of `llvm.obj`, which leaves these open, each cheap to run through
+  `graalvm-dev.yml` with a purpose-built program:
+  - a throw/catch **across an MSVC-compiled JNI frame** (Java -> JNI -> Java -> throw, caught in the
+    outer Java frame): the one path where libunwind's SEH mode has to restore R14/R15 through frames
+    it did not compile. `hello` only unwinds within LLVM-compiled code.
+  - the **`StackOverflowError` path through `protectYellowZone`**: recursion deep enough to hit the
+    yellow zone and recover, which exercises the stack-boundary code with the new Win64 frame layout.
+  - a **large-frame method** (a frame bigger than a page) so `__chkstk` is actually emitted and the
+    msvc/mingw stack-probe question stops being theoretical - see the `__chkstk` finding above, where
+    zero probe symbols appear in `hello`.
+  - the darwin **`x27`/`x28` reserved-register rejection** in `llc` (the task 9 finding above), which
+    is what keeps darwin-aarch64 out of the release.
+  - **JNI wrappers in plain `.text`**: they sit outside `[__svm_code_section, __svm_text_end)` by
+    design; a program that stack-walks from inside a wrapper would confirm the reasoning empirically.
+  - the Windows native-image **"2 warnings"** nobody has read yet: retrieve them from a
+    `graalvm-dev.yml` run's work-dir artifact (`work/stdout.txt` / `work/stderr.txt`).
+
 ## Decisions
 
 - 2026-09-17 (controller ruling, task 6): **this branch uses the stock `org.bytedeco` jars from
@@ -814,8 +853,11 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   unwinder, triggered by the reviewer after two failed review cycles on Task 8.
 - 2026-09-17: Windows uses a single LLVM batch (one object) instead of `ld -r`; code bounds come from
   COFF grouped sections `.text$svm0` / `.text$svm1` / `.text$svm2` (spec section 3).
-- 2026-09-17: The windows-x86_64 shadowed jars are referenced from suite.py by their GitHub release URL
-  and sha512 directly (no lafo URL to rewrite). darwin-aarch64 only gets `moduleName` lines.
+- 2026-09-17: ~~The windows-x86_64 shadowed jars are referenced from suite.py by their GitHub release URL
+  and sha512 directly (no lafo URL to rewrite). darwin-aarch64 only gets `moduleName` lines.~~
+  **Superseded - see the stock-jars decision (2026-09-17, controller ruling, task 6) at the top of this
+  section: suite.py points every platform, darwin-aarch64 included, at the stock `org.bytedeco` jars on
+  Maven Central, and no shadowed jar of ours is referenced at all.**
 - 2026-09-17: Triple for Java code: `x86_64-pc-windows-msvc` (LSDA confirmed in run
   https://github.com/Throwaway68/gha-graal/actions/runs/35207562231).
 - 2026-09-17: libunwind is built for `x86_64-w64-windows-gnu` by `scripts/llvm/build-unwind-win.sh` against the
@@ -848,6 +890,23 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   so moving them would put a second `.text$svm1`-named section in the object, exactly the ambiguity
   `parseCode` cannot afford; and nothing reads the end marker at run time, so making it exact buys
   nothing. Evidence for both in the findings above.
+
+- 2026-09-17 (final review): **the spec's section 3 verification is done at build time, not at run
+  time, and there is one object rather than a list.** The spec asks for the per-batch objects to be
+  handed to the final image link as a list, and for a runtime check that every compiled method's
+  address lies between `__svm_code_section` and `__svm_text_end`. Neither is what the implementation
+  does. Windows compiles the whole image as a **single LLVM batch**, because the method offsets have
+  to be known before the image is linked - a per-batch list cannot provide them, as each object's
+  placement is only decided by the linker - and one object is what makes `parseCode`'s
+  "offset within `.text$svm1`" contract hold. Placement is therefore verified at **build time**:
+  `LLVMObjectFileReader.parseCode` reads every method's offset out of the first `.text$svm1` section
+  and the first method sits at offset 0 (the `InvalidMethodPointerHandler` stub), backed by the
+  offline `objdump`/`llvm-nm`/`llvm-readobj` evidence in the findings above (`.text$svm0` and
+  `.text$svm2` empty and holding the two markers at offset 0, `.text$svm1` 0x266a6e bytes, the SEH
+  glue in `.text$svm3`, the JNI wrappers in plain `.text`). **Nothing reads the markers at run time**
+  - they exist only because `NativeImage.build` declares them undefined when the code cache does not
+  define them - so a runtime bounds check would have had to be written for the occasion and would
+  have tested the linker, not the image. Recorded as a deviation rather than a gap.
 
 
 ## Dead ends
