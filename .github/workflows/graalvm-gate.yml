@@ -1,0 +1,293 @@
+name: GraalVM gate
+
+# substratevm's own gate under the Native Image LLVM backend, on one platform. This is the
+# `use_llvm` configuration of Oracle's CI (`substratevm/ci/ci_common/svm-gate.libsonnet`): the
+# `basics` tags with `--extra-image-builder-arguments="-H:+UnlockExperimentalVMOptions
+# --tool:llvm-backend -H:-UnlockExperimentalVMOptions"`. There is no `llvm` gate tag; the backend
+# is selected purely by those image builder arguments, so any tag can be run under it.
+#
+# Everything up to the gate step is `graalvm-dev.yml`'s build preamble (checkouts, mx cache,
+# LabsJDK, URL rewrites, MSVC) - deliberately copied rather than factored out, so that the dev
+# loop that rounds 1 and 2 were debugged with keeps working exactly as it did.
+#
+# Unlike `graalvm-dev.yml` this workflow does not build a GraalVM itself: `mx gate` runs from
+# `graal/substratevm`, and substratevm's gate builds the GraalVM home it needs (its `build` tag,
+# then `native_image_context` in `mx_substratevm.py`). That home carries the LLVM backend because
+# `svml` (Native Image LLVM Backend) is registered by substratevm's own mx suite whenever
+# `llvm_supported` holds - it does on this branch, on every platform - and its only dependency,
+# `llp` (LLVM.org toolchain), is registered by the sdk suite, which substratevm imports. With no
+# `--components`/`COMPONENTS` restriction in the environment, mx includes every registered
+# component, so `--tool:llvm-backend` resolves without an `--env` file. See the journal entry
+# "how the gate finds the LLVM backend" (2026-09-18).
+
+on:
+  workflow_dispatch:
+    inputs:
+      graal_ref:
+        description: 'Ref in Throwaway68/graal'
+        default: 'graal/25.3.4.1-win-llvm'
+        required: true
+        type: string
+      llvm_release:
+        description: 'LLVM release tag in this repo'
+        default: 'llvm-22.1.8-graal.3'
+        required: true
+        type: string
+      platform:
+        description: 'One platform'
+        default: 'windows-amd64'
+        type: choice
+        options: [windows-amd64, linux-amd64, darwin-aarch64]
+      tags:
+        description: 'mx gate --tags (comma separated; `mx gate --dry-run` lists them)'
+        default: 'build,helloworld,hellomodule'
+        type: string
+      extra_image_builder_args:
+        description: 'mx gate --extra-image-builder-arguments (the use_llvm string by default; empty runs the same tags without the backend)'
+        default: '-H:+UnlockExperimentalVMOptions --tool:llvm-backend -H:-UnlockExperimentalVMOptions'
+        type: string
+      extra_gate_args:
+        description: 'Extra arguments appended to the mx gate command line, e.g. `--partial 1/2` or `--extra-unittest-argument=...`'
+        default: ''
+        type: string
+      debug_ssh:
+        description: 'Open an interactive ssh session on the runner after the gate (tmate on linux/macOS, OpenSSH + cloudflared on windows); the address is in artifact ssh-<platform> (windows) / tmate-<platform> (linux/macOS)'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  LANG: en_US.UTF-8
+  MX_GIT_CACHE: refcache
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  gate:
+    name: ${{ inputs.platform }} / ${{ inputs.tags }}
+    runs-on: ${{ inputs.platform == 'windows-amd64' && 'windows-2022' || inputs.platform == 'darwin-aarch64' && 'macos-14' || 'ubuntu-22.04' }}
+    # The gate builds substratevm and its GraalVM home before the first image; on windows-amd64
+    # that alone is ~25 min, and `debug_ssh` holds the runner for up to 180 min after it.
+    timeout-minutes: 240
+    steps:
+      - name: Checkout gha-graal
+        uses: actions/checkout@v7.0.1
+        with:
+          path: ci
+          persist-credentials: false   # nothing here pushes; keeps the job token out of .git/config during an ssh session
+      - name: Checkout graal
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: Throwaway68/graal
+          ref: ${{ inputs.graal_ref }}
+          path: graal
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Derive paths
+        shell: bash
+        # JDK_ID and GRAAL_SHA are not used by any later step; they are here so that every step's
+        # environment dump in the log says exactly which JDK and which graal commit was gated.
+        run: |
+          echo "MX_PATH=$GITHUB_WORKSPACE/mx" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=$GITHUB_WORKSPACE/jdk" >> "$GITHUB_ENV"
+          echo "MX_VERSION=$(jq -r '.mx_version' graal/common.json)" >> "$GITHUB_ENV"
+          echo "JDK_ID=$(jq -r '.jdks["labsjdk-ce-latest"].version' graal/common.json)" >> "$GITHUB_ENV"
+          echo "GRAAL_SHA=$(git -C graal rev-parse HEAD)" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then echo "MX_PYTHON=python" >> "$GITHUB_ENV"; else echo "MX_PYTHON=python3" >> "$GITHUB_ENV"; fi
+      - name: Checkout mx
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: graalvm/mx
+          ref: ${{ env.MX_VERSION }}
+          path: mx
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Python dependencies
+        shell: bash
+        # The `helloworld` tag ends in the gate task `Validate JSON build info`, which checks
+        # native-image's `build-output.json` against the schema in `graal/docs` and aborts with
+        # "Python module \"jsonschema\" is required to validate reachability metadata but was not
+        # found" without it (run 35348125338). `$MX_PYTHON` rather than `python3`: mx runs `python`
+        # on windows-2022, and the module has to be in the interpreter mx itself uses.
+        run: |
+          "${MX_PYTHON:-python3}" -m pip install --disable-pip-version-check jsonschema
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build zlib1g-dev
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja cmake || true
+      - name: Windows MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      # As in `graalvm-dev.yml`: the only cache is mx's downloads, and it is restored before and
+      # saved after the long step, with restore/save rather than actions/cache@v4 because that
+      # action's post step is `post-if: success()` and a gate that fails - the normal case while a
+      # tag is being made green - would never save anything.
+      #
+      # Own key prefix, because a gate downloads strictly more than the dev loop (every component
+      # the GraalVM home gets, plus the unittest dependencies), so a gate cache would keep growing
+      # a dev cache for no benefit. `dev-mxdl-` stays in restore-keys as a warm start for the first
+      # gate run on a platform: mx verifies every artifact's digest, so an incomplete or older set
+      # is safe to start from.
+      - name: Restore mx download cache
+        id: mxdl
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.mx/cache
+          key: gate-mxdl-${{ inputs.platform }}-${{ inputs.llvm_release }}-${{ hashFiles('graal/common.json', 'graal/*/mx.*/suite.py') }}
+          restore-keys: |
+            gate-mxdl-${{ inputs.platform }}-${{ inputs.llvm_release }}-
+            dev-mxdl-${{ inputs.platform }}-${{ inputs.llvm_release }}-
+      - name: Fetch LabsJDK
+        shell: bash
+        # Run inside the graal checkout so mx resolves labsjdk-ce-latest from graal/common.json.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/jdk-dl"
+          cd graal
+          "$MX_PATH/mx" --java-home= fetch-jdk --jdk-id labsjdk-ce-latest --to "$GITHUB_WORKSPACE/jdk-dl" --alias "$JAVA_HOME"
+          if [ -d "$JAVA_HOME/Contents/Home" ]; then echo "JAVA_HOME=$JAVA_HOME/Contents/Home" >> "$GITHUB_ENV"; fi
+      - name: Point graal at our LLVM release (MX_URLREWRITES)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.llvm_release }}" --repo "${{ github.repository }}" --pattern manifest.json --dir llvm-release --clobber
+          python3 ci/scripts/release_tools.py urlrewrites llvm-release/manifest.json \
+            "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ inputs.llvm_release }}" > urlrewrites.json
+          echo "MX_URLREWRITES=$GITHUB_WORKSPACE/urlrewrites.json" >> "$GITHUB_ENV"
+      - name: Install env file
+        shell: bash
+        # The gate does not use it - it must not, see the header: an env file with a COMPONENTS
+        # list would restrict the GraalVM home the gate builds. It is installed so that an ssh
+        # session on this runner can fall back to the dev loop's build
+        # (`cd graal/vm && "$MX_PATH/mx" --env ce-llvm-dev build`) without fetching anything.
+        run: cp ci/mx-env/ce-llvm-dev graal/vm/mx.vm/ce-llvm-dev
+      - name: Gate (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        # The longest green gate so far is 34 min (windows-amd64, `build,helloworld`); 90 leaves
+        # room for the heavier tags and still fails a hung image build long before the job's 240,
+        # so the summary, the artifact and an ssh session are still reached.
+        timeout-minutes: 90
+        # Exactly the command line Oracle's CI uses (svm-gate.libsonnet:15-47), plus a tee so that
+        # the log is both live in the job and in the artifact. `-e -o pipefail` is the Actions bash
+        # default, so a failing gate fails the step through the pipeline's status.
+        run: |
+          cd graal/substratevm
+          "$MX_PATH/mx" --strict-compliance gate --strict-mode --tags "${{ inputs.tags }}" \
+            --extra-image-builder-arguments="${{ inputs.extra_image_builder_args }}" ${{ inputs.extra_gate_args }} \
+            2>&1 | tee "$GITHUB_WORKSPACE/gate.log"
+          exit "${PIPESTATUS[0]}"
+      - name: Gate (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        timeout-minutes: 90   # as above
+        # cmd has no `tee`, so the log is buffered to a file and printed afterwards: the step shows
+        # nothing while it runs. With `debug_ssh: true` the session can follow it live
+        # (`tail -f "$GITHUB_WORKSPACE/gate.log"`), which is how the Windows failures are worked on.
+        run: |
+          cd graal\substratevm
+          call %MX_PATH%\mx.cmd --strict-compliance gate --strict-mode --tags "${{ inputs.tags }}" --extra-image-builder-arguments="${{ inputs.extra_image_builder_args }}" ${{ inputs.extra_gate_args }} > %GITHUB_WORKSPACE%\gate.log 2>&1
+          set rc=%ERRORLEVEL%
+          type %GITHUB_WORKSPACE%\gate.log
+          exit /b %rc%
+      - name: Save mx download cache
+        # After the gate, not before: the gate itself downloads most of what lands in the cache.
+        if: always() && steps.mxdl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.mx/cache
+          key: ${{ steps.mxdl.outputs.cache-primary-key }}
+      - name: Gate summary
+        if: always()
+        shell: bash
+        # One file that says which gate task passed, failed or never finished, so that reading a
+        # run does not mean scrolling a 100k-line log. MX_PYTHON, because windows-2022 has no
+        # `python3` on PATH.
+        run: |
+          "${MX_PYTHON:-python3}" ci/scripts/graalvm/gate-summary.py "$GITHUB_WORKSPACE/gate.log" \
+            | tee "$GITHUB_WORKSPACE/gate-summary.txt"
+      # Interactive debugging instead of a workflow round trip per attempt: with `debug_ssh` on,
+      # the job stops here - after the gate, whether it passed or failed - and publishes how to
+      # reach this runner. Copied verbatim from `graalvm-dev.yml`, including the reasons; the short
+      # version is that tmate's action hangs forever on windows-2022, so Windows gets the same
+      # thing from `scripts/graalvm/win-ssh.ps1` (OpenSSH + a cloudflared quick tunnel), the
+      # address travels as an artifact because a running job's log is not readable through the
+      # API, and every step carries its own timeout so that `debug_ssh: true` cannot burn the
+      # job timeout.
+      - name: Debug over ssh (tmate)
+        id: tmate
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
+        timeout-minutes: 45
+        uses: mxschmitt/action-tmate@v3.24
+        with:
+          limit-access-to-actor: true
+          connect-timeout-seconds: 300
+          detached: true
+      - name: Publish the ssh address
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          mkdir -p tmate
+          printf '%s\n%s\n' '${{ steps.tmate.outputs.ssh-command }}' '${{ steps.tmate.outputs.web-url }}' | tee tmate/address.txt
+      - name: Upload the ssh address
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: tmate-${{ inputs.platform }}
+          path: tmate/address.txt
+      - name: Hold the runner for the ssh session
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
+        timeout-minutes: 180
+        shell: bash
+        run: |
+          hold=$RUNNER_TEMP/gha-hold
+          : > "$hold"
+          echo "holding the runner; in the ssh session run: rm '$hold'"
+          while [ -f "$hold" ]; do sleep 15; done
+          echo "hold released"
+      - name: Debug over ssh (Windows OpenSSH + cloudflared)
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os == 'Windows' }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: pwsh ci/scripts/graalvm/win-ssh.ps1 -Actor '${{ github.actor }}' -OutDir "$env:RUNNER_TEMP\ssh" -HoldFile "$env:RUNNER_TEMP\gha-hold"
+      - name: Upload the ssh address (Windows)
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os == 'Windows' }}
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ssh-${{ inputs.platform }}
+          path: ${{ runner.temp }}/ssh/address.txt
+      - name: Hold the runner for the ssh session (Windows)
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os == 'Windows' }}
+        timeout-minutes: 180
+        shell: bash
+        # No `: > "$hold"` as on linux/macOS: win-ssh.ps1 writes the hold file, so a failed step
+        # there means no session to wait for and the job goes straight on.
+        run: |
+          hold=$RUNNER_TEMP/gha-hold
+          echo "holding the runner; in the ssh session run: rm '$hold'"
+          while [ -f "$hold" ]; do sleep 15; done
+          echo "hold released"
+      - name: Upload the gate log and summary
+        uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: gate-${{ inputs.platform }}-${{ github.run_id }}
+          # The gate log is the record of the run; the reports are what the image builds leave
+          # behind under `mxbuild/<platform>/svmbuild`. No object files and no images: they add
+          # hundreds of MB and the ssh session is the place to look at them.
+          path: |
+            gate-summary.txt
+            gate.log
+            graal/substratevm/mxbuild/**/svmbuild/**/reports/**
+            graal/substratevm/mxbuild/**/svmbuild/*.log
+          if-no-files-found: ignore

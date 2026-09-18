@@ -52,3 +52,6 @@ tests/programs/export/Export.java
 tests/programs/export/export.c
 tests/programs/export/expected.txt
 tests/programs/export/javac.flags
+.github/workflows/graalvm-gate.yml
+scripts/graalvm/gate-summary.py
+tests/test_gate_summary.py

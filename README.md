@@ -84,6 +84,52 @@ one picked up by its mere presence:
 and opens a shell on the runner: tmate on linux/macOS, and on windows-amd64 the Windows OpenSSH
 server behind a cloudflared quick tunnel (`scripts/graalvm/win-ssh.ps1`), because tmate's action
 hangs on windows-2022.
+**GraalVM gate** (`graalvm-gate.yml`): `gh workflow run graalvm-gate.yml -f platform=windows-amd64 -f tags=build,helloworld`.
+substratevm's own gate under the LLVM backend, on one platform - Oracle's `use_llvm` configuration
+(`substratevm/ci/ci_common/svm-gate.libsonnet`), which is not a gate tag but the image builder
+arguments `-H:+UnlockExperimentalVMOptions --tool:llvm-backend -H:-UnlockExperimentalVMOptions`
+applied to the ordinary tags. The job runs
+
+    cd graal/substratevm && mx --strict-compliance gate --strict-mode --tags <tags> \
+        --extra-image-builder-arguments="<extra_image_builder_args>" <extra_gate_args>
+
+and nothing else: it builds no GraalVM of its own, because the gate builds the home it needs and
+that home carries the backend (`svml` comes from substratevm's own mx suite, its dependency `llp`
+from the sdk suite, and nothing restricts `COMPONENTS`), so no `--env` and no `mx-env/ce-llvm-dev`
+- activating that env file would in fact *restrict* the home. Inputs: `graal_ref` (a branch or a
+**full** 40-character SHA), `llvm_release`, `platform`, `tags` (`mx gate --dry-run` lists them),
+`extra_image_builder_args` (pass something harmless like `-H:+ReportExceptionStackTraces` to run
+the same tags without the backend - note `gh ... -f extra_image_builder_args=` keeps the default),
+`extra_gate_args` (e.g. `--partial 1/2`) and `debug_ssh`. The artifact
+`gate-<platform>-<run-id>` holds `gate.log` and `gate-summary.txt`, which
+`scripts/graalvm/gate-summary.py` distils out of the log - one line per gate task with its status
+and duration, the verdict, and the mx command that failed:
+
+    Versions                    ok       0:00:00.588358
+    ...
+    BuildWithJavac              ok       0:03:45.648151
+    image demos                 ok       0:17:54.330950
+    ------------------------    -------  -------
+    Gate                        ok       0:22:43.110490
+    GATE PASSED: ...
+
+Status of the tags under the backend (2026-09-18, round 3 task 1, graal `54969a2cee8`): `build`
+and `helloworld` are **green on linux-amd64 and windows-amd64** - windows
+[run 35363499659](https://github.com/Throwaway68/gha-graal/actions/runs/35363499659), gate step
+33m46s of which `image demos` 26m41s; linux
+[run 35363511118](https://github.com/Throwaway68/gha-graal/actions/runs/35363511118), 23m51s and
+18m49s. That tag builds and runs a native `javac`, four helloworld variants (one of them a shared
+library called through ctypes), `cinterfacetutorial` and `clinittest`, all with the backend.
+`hellomodule` builds and runs three of its four variants on both platforms and cannot build the
+fourth (`-H:+RuntimeClassLoading`): the Ristretto interpreter's bytecode-handler stubs use Graal's
+multi-value return, which the LLVM backend does not implement - on any platform, linux-amd64
+included. How expensive implementing it would be is an open question; the journal has the numbers
+and the analysis.
+
+**Interactive session on the runner.** `-f debug_ssh=true` stops the dev job after `dev-run`, and
+the gate job after the gate, and opens a shell on the runner: tmate on linux/macOS, and on
+windows-amd64 the Windows OpenSSH server behind a cloudflared quick tunnel
+(`scripts/graalvm/win-ssh.ps1`), because tmate's action hangs on windows-2022.
 
     gh workflow run graalvm-dev.yml -f platform=windows-amd64 -f program=hello -f debug_ssh=true
     gh run download <run-id> -n ssh-windows-amd64     # ~10 min after the dispatch, once the build is through
