@@ -114,9 +114,12 @@ and duration, the verdict, and the mx command that failed:
     Gate                        ok       0:22:43.110490
     GATE PASSED: ...
 
-**Status of the tags under the backend** (2026-09-18, round 3, graal `fb017323af7`). Every row was
+**Status of the tags under the backend** (2026-09-18, round 3, graal `fb017323af7`; the branch head
+is `8685b25eda2`, two review fixes on top, re-verified by
+[run 35390104429](https://github.com/Throwaway68/gha-graal/actions/runs/35390104429)). Every row was
 run on windows-amd64 first and on linux-amd64 as the reference; a failure that also happens on Linux
-is a property of the backend, not of Windows, and not one of this round's fixes was needed on Linux.
+is a property of the backend, not of Windows. Four of this round's six root causes appeared on Linux
+too; only the watchdog and `roundeven` fixes were Windows-only.
 
 | tag | windows-amd64 | linux-amd64 | result |
 |-----|---------------|-------------|--------|
@@ -143,9 +146,13 @@ currently unimplemented on the LLVM backend (GR-43073)"). `debuginfotest` and th
 pointsto unittests are skipped on Windows by `svm_gate_body` itself, backend or no backend.
 
 Tests that cannot run under the backend are listed with their reason in
-`substratevm/mx.substratevm/llvm-unittest-blacklist` on the graal branch; `mx native-unittest` uses
-that file only when the build arguments contain `--tool:llvm-backend` and the caller passed no
-`--blacklist` of its own, so a build without the backend runs exactly the same tests as before.
+`substratevm/mx.substratevm/llvm-unittest-blacklist` on the graal branch. The mechanism is keyed on
+the build arguments: `mx native-unittest` uses that file - and drops the image features the backend
+cannot register - only when they contain `--tool:llvm-backend` or the `CompilerBackend=llvm` that
+macro sets, and only when the caller passed no `--blacklist` of its own, so a build without the
+backend runs exactly the same tests as before. It applies to the gate tasks and to
+`mx native-unittest --build-args ... --tool:llvm-backend -- <class>` alike, which is the command to
+reproduce a single test class on a runner.
 
 **Interactive session on the runner.** `-f debug_ssh=true` stops the dev job after `dev-run`, and
 the gate job after the gate, and opens a shell on the runner: tmate on linux/macOS, and on

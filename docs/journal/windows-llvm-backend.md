@@ -2170,6 +2170,40 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   inexact - i.e. it *is* `roundeven` for a VM that never changes the rounding mode, and Substrate VM
   never does, there being no Java API for it. ELF and Mach-O keep the intrinsic.
 
+- 2026-09-18 (task 2, **round 3 review fix round 1**, run https://github.com/Throwaway68/gha-graal/actions/runs/35390104429, fix graal `80e2525f987`):
+  **the feature drop worked for the gate and not for `mx native-unittest` on the command line -
+  which is the one path this port debugs with.** Task 2 filtered
+  `_LLVM_BACKEND_UNSUPPORTED_UNITTEST_FEATURES` inside `_compute_native_unittest_args`, on the
+  `extra_build_args` its caller passes. Every gate task passes them, so the gate went green; the
+  `native-unittest` command (`mx_substratevm.py`, `@mx.command(... 'native-unittest')`) calls that
+  same function with **no** build arguments and only afterwards merges the user's own
+  `--build-args` block into the argument list. `--tool:llvm-backend` was therefore invisible at the
+  moment the decision was made, `--features=...ForeignTests$TestFeature...` survived, and
+
+      mx native-unittest --build-args -H:+UnlockExperimentalVMOptions --tool:llvm-backend \
+          -- com.oracle.svm.test.jni.JNIGlobalHandlesTest
+
+  still died in `ImageSingletons do not contain key ...RuntimeForeignAccessSupport`. The loop this
+  port is debugged with - reproduce one test class on the runner in minutes - did not work under the
+  backend, and nothing in the gate could have shown it.
+
+  The decision now happens in `_native_unittest`, after argparse has merged everything and on the
+  same list that the image is built from. That is the single point every native-unittest path meets:
+  `native_unittests_task`, `java_desktop_integration_task`, `runtime_classpath_resource_test_task`
+  and the command. `_compute_native_unittest_args` goes back to emitting the full feature list.
+  `_llvm_backend_selected` also matches `CompilerBackend=llvm`, the option the `llvm-backend` macro
+  sets, so a command line that passes the option instead of the macro is recognised too.
+
+  Verified in one run, both paths at once: the gate task `native unittests` is still green
+  (`native unittests` 6m19s, gate 22m28s, GATE PASSED) *and* the standalone command builds and passes (5m09s: `Not registering com.oracle.svm.test.foreign.ForeignTests$TestFeature`, `Excluding the test classes listed in .../llvm-unittest-blacklist`, `Finished generating 'svmjunit' in 4m 58s`, `OK (6 tests)`, `Test run PASSED`), from a temporary extra
+  step in `graalvm-gate.yml` that runs exactly that command line after the gate. The step was
+  reverted afterwards; a tmate session would have proved the same thing, and the step was chosen
+  because it leaves the evidence in the run's artifact instead of in a terminal.
+
+  Generalisation for anyone adding a backend-conditional to this harness: `_compute_native_unittest_args`
+  runs **before** the caller's arguments exist, `_native_unittest` runs **after**. Anything that has
+  to look at the effective build arguments belongs in the second.
+
 
 ## Decisions
 
