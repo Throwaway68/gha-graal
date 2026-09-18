@@ -910,6 +910,80 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
     `ssh -o ProxyCommand='cloudflared access tcp --hostname %h'`. The hostname goes into artifact
     `ssh-<platform>`, not into the log, because a job's log is not readable through the API while the
     job runs - the same reason the tmate block publishes an artifact.
+- 2026-09-18 (task 2, run https://github.com/Throwaway68/gha-graal/actions/runs/35326741758):
+  **`stress` is green on linux-amd64 - `DEV-RUN OK` - but only after two of its checks were split
+  into programs of their own**, because the LLVM backend crashes the process on both. It took three
+  runs to get there:
+
+  | run | program under test | last line printed | crashed in | exit |
+  |-----|--------------------|-------------------|------------|------|
+  | 35324820994 | `stress`, 12 checks | `OK finally-order` | `stack-overflow` | 139 (SIGSEGV, empty stderr) |
+  | 35325689605 | `stress`, 11 checks | `OK gc-pressure` | `threads-basic` | 134 (abort after the `SegfaultHandler` dump) |
+  | 35326741758 | `stress`, 11 checks | `STRESS OK` | - | 0 |
+
+  Only `stress` has ever run on the LLVM backend: `tests/programs/overflow` and
+  `tests/programs/excgc`, which carry the two checks taken out of it, are **verified on HotSpot
+  only** - no workflow run has been spent on either.
+
+  Timings are stable across all three: job 7m48s / 7m47s / 7m57s, `Build` 5m39s / 5m43s / 5m38s,
+  `dev-run` 1m03s / 1m07s / 1m07s of which native-image is ~58 s. The image is 8.83 MiB from 5,265
+  compilation units, Serial GC, and the build prints no warnings. The green run's stderr is empty.
+  The eleven checks that pass are `throw-catch-deep`, `implicit-exceptions`, `rethrow-wrap`,
+  `finally-order`, `gc-live-frames`, `gc-weakref`, `gc-pressure`, `threads-basic`, `threads-gc`,
+  `threads-wait-notify`, `thread-exceptions`: exception unwinding through 60 frames with `finally`
+  blocks, the six implicit exceptions, single-threaded GC with live references held in every frame
+  of a 40-deep recursion, weak references and a reference queue, sustained allocation pressure,
+  eight threads on a monitor and atomics, per-thread GC, wait/notify, and per-thread exceptions
+  including an uncaught handler and an interrupt.
+
+- 2026-09-18 (task 2, runs as above): **the LLVM backend's stack traces are complete: `deep frames
+  in trace: 61` on linux-amd64**, exactly what HotSpot prints. The plan's fallback - lower the
+  `frames >= 60` thresholds to 10 and record the number, on the theory that inlined frames might be
+  missing from the backend's frame info - is therefore **not needed and was not applied**.
+
+- 2026-09-18 (task 2, run https://github.com/Throwaway68/gha-graal/actions/runs/35324820994):
+  **on linux-amd64 the LLVM backend does not raise a catchable `StackOverflowError`; unbounded
+  recursion kills the process with SIGSEGV (exit 139) and an empty stderr.** The check is
+  `recurse(n) { return recurse(n + 1) + 1; }` inside `try`/`catch (StackOverflowError)`. Not even
+  the `SegfaultHandler` dump appears, which the `threads-basic` crash below does produce, so the
+  fault is taken somewhere the handler cannot report from - consistent with the thread running off
+  the end of its stack rather than tripping a stack-boundary check. Now
+  `tests/programs/overflow`; green on HotSpot.
+
+- 2026-09-18 (task 2, run https://github.com/Throwaway68/gha-graal/actions/runs/35325689605):
+  **on linux-amd64 `stress` crashed in `threads-basic` with the lambda's captured references
+  pointing above every mapped heap chunk, in the code after `catch (Boom)`.** Thread `worker-5` in
+  `Stress.lambda$threadsBasic$0`, SIGSEGV with
+  `si_code 2` (SEGV_ACCERR) at `heapBase + 116918892`, 1.448 s in, after 51 incremental and 3
+  complete collections, one of which another worker had queued 19 ms earlier. The faulting
+  instruction is `lock incl 0x4(%r9)` (the unused-result `caught.incrementAndGet()`, weakened from
+  `xadd`), followed by `movslq 0x0(%r13),%rax` / `lock add %rax,0x8(%r8)`
+  (`atomic.addAndGet(junk[i % 256])`): so `%r8` and `%r9` are the lambda's captured `AtomicLong` and
+  `AtomicInteger`, and they - with `%rsi` and `%rdi` - all point at `0x00007fbe1c500a??`, which the
+  dump calls "an unknown value" because it is above every mapped eden chunk (the highest ends at
+  `0x00007fbe1c300000`). *Inference*, not something the dump states: a collection moved those
+  objects out of that region and the frame went on using the pre-collection addresses in the
+  iteration after `catch (Boom b)`. (`StackOverflowCheckImpl.stackBoundaryTL = 1` and
+  `yellowZoneStateTL = 0x7efefefe` in the same dump are **not** a clue - they are exactly what
+  `StackOverflowCheckImpl.disableStackOverflowChecksForFatalError()` sets on the crashing thread
+  before the dump is printed.)
+
+  **Hypothesis: references live across an invoke are not reported to the GC on the unwind edge**, so
+  the statepoint for the exception path does not relocate them. It fits the contrast in the same
+  program: `gc-live-frames` and `gc-pressure` do heavy GC with live references and pass, and
+  `threads-gc` passes, but only `threads-basic` combined a caught exception with an allocating loop.
+  Not proven - it is one reading of the register dump. `tests/programs/excgc` is the reduced
+  single-threaded reproducer: 20,000 rounds of `new int[4096]` and a caught `deep(5)`, where
+  `deep(0)` allocates and, every 64th round, calls `System.gc()` from the deepest frame before
+  throwing, so 313 collections are taken *while the throwing call is on the stack* and three
+  references live across that invoke (`counter`, `box`, `junk`) are summed after the catch. It is
+  green on HotSpot in 0.7 s and **has not yet been run on the backend**, so it is not confirmed to
+  reproduce the crash.
+
+  For both this and the `StackOverflowError` crash: **whether stock upstream graal's Linux LLVM
+  backend behaves the same is unknown** - no run against an unmodified ref was made - so it is not
+  established whether this branch introduced either. Both are Linux-side backend questions, not
+  Windows ones, and both are open for a later task.
 
 
 ## Decisions
@@ -989,6 +1063,18 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   - they exist only because `NativeImage.build` declares them undefined when the code cache does not
   define them - so a runtime bounds check would have had to be written for the occasion and would
   have tested the linker, not the image. Recorded as a deviation rather than a gap.
+
+
+- 2026-09-18 (task 2): **the directory is `stress`, not `runtime`.** `dev-run.sh` derives the main
+  class from the directory name, so `runtime` would mean a class `Runtime` in the default package,
+  which shadows `java.lang.Runtime` for every unqualified use inside it - the program's own
+  `Runtime.getRuntime().availableProcessors()` would not compile.
+
+- 2026-09-18 (controller ruling, task 2): **`stress` is the set of checks that pass on the Linux
+  LLVM backend; `tests/programs/overflow` and `tests/programs/excgc` hold the two known Linux-side
+  backend failures for a later task.** Left inside `stress` either crash hides every check after it,
+  and tasks 3 and 4 need a baseline that is green on the platform where the backend is meant to be
+  known-good. The two findings above are the record of what was removed and why.
 
 
 ## Dead ends

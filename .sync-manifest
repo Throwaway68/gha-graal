@@ -33,3 +33,9 @@ mx-env/ce-llvm-dev
 .github/workflows/graalvm-dev.yml
 docs/superpowers/plans/2026-09-18-windows-llvm-backend-round2.md
 scripts/graalvm/win-ssh.ps1
+tests/programs/stress/Stress.java
+tests/programs/stress/expected.txt
+tests/programs/overflow/Overflow.java
+tests/programs/overflow/expected.txt
+tests/programs/excgc/Excgc.java
+tests/programs/excgc/expected.txt

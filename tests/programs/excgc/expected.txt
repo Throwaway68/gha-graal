@@ -1,0 +1,2 @@
+OK exception-gc
+EXCGC OK
