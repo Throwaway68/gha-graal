@@ -33,7 +33,7 @@ on:
         default: ''
         type: string
       debug_ssh:
-        description: 'Open an interactive ssh/tmate session on the runner after dev-run (linux-amd64 and darwin-aarch64 ONLY - ignored on windows-amd64, see the comment at the step)'
+        description: 'Open an interactive ssh session on the runner after dev-run (tmate on linux/macOS, OpenSSH + cloudflared on windows); the address is in artifact ssh-<platform>'
         default: false
         type: boolean
 
@@ -174,9 +174,9 @@ jobs:
         run: bash ci/scripts/graalvm/dev-run.sh "$GRAALVM_HOME" "ci/tests/programs/${{ inputs.program }}" "$GITHUB_WORKSPACE/work" ${{ inputs.ni_args }}
       # Interactive debugging instead of a workflow round trip per attempt (the user's tip): with
       # `debug_ssh` on, the job stops here - after the build and after dev-run, whichever failed -
-      # and prints an ssh command and a web-shell URL for this runner. The session ends when you
-      # type `exit` (or after the step timeout), then the job finishes normally and still uploads
-      # the artifact.
+      # and publishes how to reach this runner. The session ends when the hold file is deleted from
+      # it (or after the hold step's timeout), then the job finishes normally and still uploads the
+      # artifact.
       #
       # `limit-access-to-actor: true` authorizes only the public SSH keys of the account that
       # dispatched the run, because this repository is public and the connection string lands in
@@ -192,11 +192,12 @@ jobs:
       #
       # NOT ON WINDOWS. `mxschmitt/action-tmate@v3.24` in detached mode never returns on
       # windows-2022: run 35262580562 sat in this step for 57 minutes without reaching the next
-      # one and had to be cancelled. The whole block is therefore skipped there, and a warning
-      # says so, so that `debug_ssh: true` on windows-amd64 cannot burn the 240-minute job
-      # timeout. Every step below also carries its own `timeout-minutes` as a second line of
-      # defence. To debug a Windows runner interactively, start tmate by hand from MSYS2 in a
-      # `run:` step instead of using the action.
+      # one and had to be cancelled. The tmate block is therefore skipped there; windows-amd64
+      # gets the same thing from its own block below (the Windows OpenSSH server plus a cloudflared
+      # quick tunnel, `scripts/graalvm/win-ssh.ps1`), which publishes its address the same way,
+      # through an artifact, and waits on the same kind of hold file. Every step of both blocks
+      # carries its own `timeout-minutes` as a second line of defence, so that `debug_ssh: true`
+      # can never burn the 240-minute job timeout.
       - name: Debug over ssh (tmate)
         id: tmate
         if: ${{ !cancelled() && inputs.debug_ssh && runner.os != 'Windows' }}
@@ -230,12 +231,29 @@ jobs:
           echo "holding the runner; in the ssh session run: rm '$hold'"
           while [ -f "$hold" ]; do sleep 15; done
           echo "hold released"
-      - name: Say why there is no ssh session on Windows
+      - name: Debug over ssh (Windows OpenSSH + cloudflared)
         if: ${{ !cancelled() && inputs.debug_ssh && runner.os == 'Windows' }}
-        timeout-minutes: 5
+        timeout-minutes: 10
+        shell: pwsh
+        run: pwsh ci/scripts/graalvm/win-ssh.ps1 -Actor '${{ github.actor }}' -OutDir "$env:RUNNER_TEMP\ssh" -HoldFile "$env:RUNNER_TEMP\gha-hold"
+      - name: Upload the ssh address (Windows)
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os == 'Windows' }}
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ssh-${{ inputs.platform }}
+          path: ${{ runner.temp }}/ssh/address.txt
+      - name: Hold the runner for the ssh session (Windows)
+        if: ${{ !cancelled() && inputs.debug_ssh && runner.os == 'Windows' }}
+        timeout-minutes: 180
         shell: bash
+        # No `: > "$hold"` as on linux/macOS: win-ssh.ps1 writes the hold file, so a failed step
+        # there means no session to wait for and the job goes straight on.
         run: |
-          echo "::warning::debug_ssh is ignored on windows-amd64: mxschmitt/action-tmate's detached mode never returns on windows-2022 (run 35262580562 sat in it for 57 minutes). Start tmate by hand from MSYS2 if you need a session on this runner."
+          hold=$RUNNER_TEMP/gha-hold
+          echo "holding the runner; in the ssh session run: rm '$hold'"
+          while [ -f "$hold" ]; do sleep 15; done
+          echo "hold released"
       - name: Upload work directory
         uses: actions/upload-artifact@v7.0.1
         if: always()
