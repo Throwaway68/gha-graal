@@ -4,22 +4,27 @@
     python3 scripts/graalvm/gate-summary.py gate.log
 
 `graalvm-gate.yml` runs this after the gate and uploads the output as `gate-summary.txt`, so
-that reading a run does not mean scrolling a six-figure number of log lines.
+that reading a run does not mean scrolling a five-figure number of log lines.
 
-The log lines it reads come from `Task._timestamp` / `Task.stop` / `Task.abort` in mx's
+The lines it reads come from `Task._timestamp` / `Task.stop` / `Task.abort` in mx's
 `src/mx/_impl/mx_gate.py` (mx 7.85.1):
 
-    gate: 18 Sep 2026 10:11:22(+01:23) BEGIN: image demos
-    gate: 18 Sep 2026 10:15:00(+05:01) END:   image demos [0:03:38] [disk (free/total): 12.3GB/80.0GB]
-    gate: 18 Sep 2026 10:15:00(+05:01) ABORT: image demos [0:03:38]
+    gate: 18 Sep 2026 12:52:44(+03:53) BEGIN: module build demo
+    gate: 18 Sep 2026 13:01:39(+12:48) END:   module build demo [0:08:55.555972] [disk (free/total): 72.7GB/145.2GB]
+    gate: 18 Sep 2026 13:01:39(+12:48) ABORT: Gate [0:12:48.591203] [disk (free/total): 72.7GB/145.2GB]
 
 (the `[disk ...]` suffix needs `os.statvfs`, so it is there on linux/macOS and not on Windows).
-mx wraps the whole run in a task titled `Gate`, which is reported here as the total.
 
-Deliberately driven by BEGIN/END/ABORT rather than by mx's own `Gate task times:` section at the
-end: a gate that is killed - job timeout, a hung image build, a runner that went away - never
-prints that section, and those are exactly the runs whose summary matters. A task that begins and
-never ends is reported as `RUNNING`, which is that case.
+**`END:` does not mean the task passed.** `Task.__exit__` calls `stop()` - which logs `END:` -
+while the exception that killed the task is still propagating; only the outermost task, titled
+`Gate`, gets an `ABORT:` line (`total.abort(...)` in `mx_gate.gate`). Verified on run
+35346576305, where `module build demo` printed `END:` and the gate failed inside it. So the rule
+here is: if the gate aborted, the task that failed is the last one that began, and the ones
+before it passed.
+
+Deliberately driven by BEGIN/END/ABORT rather than by mx's own `Gate task times:` section: a gate
+that is killed - job timeout, a hung image build, a runner that went away - never prints that
+section, and those are exactly the runs whose summary matters.
 """
 import re
 import sys
@@ -28,13 +33,24 @@ import sys
 TASK_LINE = re.compile(r'^gate: .*?\b(BEGIN|END|ABORT):\s+(\S.*)$')
 DURATION = re.compile(r'\s+\[(\d+:\d\d:\d\d(?:\.\d+)?)\]$')
 TOTAL_TITLE = 'Gate'
+# mx prints the commands it ran before the failure, then the same list's "use this to repeat the
+# whole gate" line; only the first block says which image build actually failed.
+CMDS_BEGIN = 'The sequence of mx commands that were executed until the failure follows:'
+CMDS_END = 'If the previous sequence is incomplete'
 
 
 def parse(lines):
-    """-> (list of (title, status, duration), (status, duration) of the total or None)."""
-    tasks, index, total = [], {}, None
+    """-> (tasks, total, last mx command) with tasks/total as [title, status, duration]."""
+    tasks, index, total, in_cmds, command = [], {}, None, False, None
     for line in lines:
-        m = TASK_LINE.match(line.rstrip('\r\n'))
+        line = line.rstrip('\r\n')
+        if line.startswith(CMDS_BEGIN):
+            in_cmds = True
+        elif line.startswith(CMDS_END):
+            in_cmds = False
+        elif in_cmds and line.startswith('mx '):
+            command = line
+        m = TASK_LINE.match(line)
         if not m:
             continue
         marker, rest = m.group(1), m.group(2)
@@ -44,38 +60,41 @@ def parse(lines):
         d = DURATION.search(rest)
         title, duration = (rest[:d.start()], d.group(1)) if d else (rest, '-')
         if marker == 'BEGIN':
-            # A repeated title (the `build` tag is re-run by `mx gate --partial`) overwrites the
-            # earlier entry's slot, so its END lands on the entry its BEGIN opened.
+            # A repeated title (`mx gate --partial` re-runs the build tasks) takes over the slot,
+            # so its END lands on the entry its own BEGIN opened.
             index[title] = len(tasks)
             tasks.append([title, 'RUNNING', '-'])
         elif title in index:
             tasks[index[title]][1:] = ['ok' if marker == 'END' else 'FAILED', duration]
     for i in range(len(tasks) - 1, -1, -1):
         if tasks[i][0] == TOTAL_TITLE:
-            total = tuple(tasks.pop(i)[1:])
+            total = tasks.pop(i)
             break
-    return [tuple(t) for t in tasks], total
+    if total and total[1] == 'FAILED' and tasks:
+        tasks[-1][1] = 'FAILED'   # see the module docstring: END: is logged for a failed task too
+    return tasks, total, command
 
 
-def report(tasks, total):
-    out = []
-    width = max([len(t[0]) for t in tasks] + [len(TOTAL_TITLE)])
+def report(tasks, total, command):
+    out, width = [], max([len(t[0]) for t in tasks] + [len(TOTAL_TITLE)])
     for title, status, duration in tasks:
         out.append(f'  {title:<{width}}  {status:<7}  {duration}')
     if total:
         out.append(f'  {"-" * width}  {"-" * 7}  {"-" * 7}')
-        out.append(f'  {TOTAL_TITLE:<{width}}  {total[0]:<7}  {total[1]}')
-    bad = [t[0] for t in tasks if t[1] != 'ok']
-    if bad:
-        out.append('GATE FAILED: ' + ', '.join(bad))
+        out.append(f'  {TOTAL_TITLE:<{width}}  {total[1]:<7}  {total[2]}')
+    failed = [t[0] for t in tasks if t[1] == 'FAILED']
+    if failed:
+        out.append('GATE FAILED: ' + ', '.join(failed))
     elif not tasks:
         out.append('GATE FAILED: no gate task ran')
-    elif not total or total[0] != 'ok':
-        # Every task passed but the gate itself did not finish: mx aborted outside a task (a
-        # `--tags` typo, --strict-mode refusing a missing tool) or the job was killed.
-        out.append('GATE INCOMPLETE: every task that started passed, but the gate did not finish')
+    elif not total or total[1] != 'ok':
+        # The gate aborted outside any task, or the log stops in the middle of one: a `--tags`
+        # typo, --strict-mode refusing a missing tool, a killed job.
+        out.append('GATE INCOMPLETE: no task failed, but the gate did not finish either')
     else:
         out.append('GATE PASSED: ' + ', '.join(t[0] for t in tasks))
+    if command:
+        out.append('last mx command: ' + command)
     return '\n'.join(out)
 
 
