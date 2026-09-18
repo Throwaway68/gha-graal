@@ -431,6 +431,43 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   https://github.com/Throwaway68/gha-graal/actions/runs/35355589921, is the one that failed in
   `clang`. windows-amd64 is task 2's job.
 
+- 2026-09-18: **`complex` is green on all three platforms, and so is the exported-symbol probe**
+  (task 2). The clean set, all on graal `54969a2cee8` (`graal/25.3.4.1-win-llvm`) and
+  `llvm-22.1.8-graal.3`, from `round4-win` at `a6f2102`:
+
+  | run | platform | program | outcome |
+  |-----|----------|---------|---------|
+  | [35362505547](https://github.com/Throwaway68/gha-graal/actions/runs/35362505547) | windows-amd64 | complex | success |
+  | [35362513762](https://github.com/Throwaway68/gha-graal/actions/runs/35362513762) | darwin-aarch64 | complex | success |
+  | [35362521536](https://github.com/Throwaway68/gha-graal/actions/runs/35362521536) | linux-amd64 | complex | success |
+  | [35362529312](https://github.com/Throwaway68/gha-graal/actions/runs/35362529312) | windows-amd64 | export | success |
+  | [35362537233](https://github.com/Throwaway68/gha-graal/actions/runs/35362537233) | linux-amd64 | export | success |
+
+  windows-amd64 (35362505547):
+
+  ```
+  == javac
+  == clang (bundled)
+  == native-image (LLVM backend)
+  Complex on Windows Server 2022, image=true
+  OK jni-add ... OK collectors
+  COMPLEX OK
+  DEV-RUN OK
+  ```
+
+  The first Windows run of `complex`,
+  https://github.com/Throwaway68/gha-graal/actions/runs/35359517138, was green as well - on the
+  first attempt, with neither a `dev-run.sh` nor a backend change (Finding below). It ran at graal
+  `5f21e16095b`, i.e. *before* round 3's export fix, which is why the `export` probe was red there
+  and is green in the table above.
+
+  `tests/programs/export` is the new program: one `@CEntryPoint(name = "gha_export_add")` that C
+  resolves in the running executable with `GetProcAddress(GetModuleHandleA(NULL), ...)` on Windows
+  and `dlsym(RTLD_DEFAULT, ...)` elsewhere, then calls with the current isolate thread. Per
+  platform, all at `54969a2cee8`: **windows-amd64 green, linux-amd64 green**, darwin-aarch64 not
+  run in CI but green locally with the stock default backend. It is deliberately not part of
+  `complex`, so that `complex` stays byte-identical everywhere.
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -1531,6 +1568,51 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   workflow run, cost about five minutes and caught three of the four problems this task had
   (the fourth, the macOS sysroot, only exists for the bundled toolchain).
 
+- 2026-09-18 (task 2, ssh session on run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35359517138): **`complex` needed no fix on
+  windows-amd64 - not in `dev-run.sh`, not in the backend.** Both Windows unknowns task 1 flagged
+  turned out to be non-issues. The bundled clang builds the JNI library with
+  `--target=x86_64-pc-windows-msvc -fuse-ld=lld -shared -I<home>/include -I<home>/include/win32`
+  under `ilammy/msvc-dev-cmd` (it picks the MSVC and UCRT headers up from `%INCLUDE%` and
+  `lld-link` picks the import libraries up from `%LIB%`), its default CRT choice matches the
+  image's `/MD`, `JNIEXPORT` = `__declspec(dllexport)` is all the DLL's exports need, and
+  `-Dcomplex.lib=D:/a/gha-graal/gha-graal/work/complex.dll` - the `pwd -W` form - is a path
+  `System.load` accepts. All sixteen checks and `COMPLEX OK` on the first attempt, i.e. JNI in
+  both directions works on Windows under the LLVM backend: downcalls, upcalls, an upcall whose
+  Java side throws, a `ThrowNew` caught in Java, a six-argument `@CEntryPoint` entered from C
+  through a function pointer, and the same traffic from six threads at once.
+
+- 2026-09-18 (task 2, same ssh session, graal `5f21e16095b` then `54969a2cee8`): **the Windows
+  export gap was real, and round 3's PE/COFF export fix closes it for executables as well as for
+  shared libraries.** `tests/programs/export` asks C to resolve the image's own
+  `@CEntryPoint(name = "gha_export_add")` in the running executable
+  (`GetProcAddress(GetModuleHandleA(NULL), ...)`; `dlsym(RTLD_DEFAULT, ...)` elsewhere). Before
+  the fix, on the runner:
+
+  ```
+  GetProcAddress(gha_export_add) failed: 127        # ERROR_PROC_NOT_FOUND
+  callExported returned -2
+  FAIL centrypoint-export
+  ```
+
+  with `llvm.obj` defining the symbol (`llvm-nm`: `00030500 T gha_export_add`) but carrying no
+  `.drectve` directives at all, and `app.exe` exporting 267 names - every one of them from the
+  JDK's static libraries (`JNI_OnLoad_java`, `GetStringPlatformChars`, ...), none from the image.
+  That is the shape the task-1 decision predicted: the code object defines the symbol, the image
+  object only declares it, and `LLVMNativeImageCodeCache.defineMethodSymbol` dropped `exported` on
+  the way, so no `/EXPORT:` directive was ever written.
+
+  With graal `54969a2cee8` ("LLVM backend: export a shared library's entry points on PE/COFF",
+  round 3, found through `helloworld --shared`) applied to the same checkout and `mx build` rerun,
+  the same program prints `OK centrypoint-export` / `EXPORT OK`, `app.obj`'s `.drectve` contains
+  `/EXPORT:gha_export_add`, and `app.exe` exports 291 names with `gha_export_add` at ordinal 277.
+  Two things worth recording beyond "it works": the fix applies to an **executable**, not only to
+  the `--shared` case it was found in, so a C host can `GetProcAddress` into an ordinary image;
+  and the export table stays small - 291 - 267 = 24 published entry points for `export`, 51 for
+  `complex` - so this cannot come near the `LNK1189: library limit of 65535 objects exceeded` that
+  `5f21e16095b` had to remove the *data* symbol exports for. No backend change of task 2's own was
+  needed.
+
 ## Decisions
 
 - 2026-09-17 (controller ruling, task 6): **this branch uses the stock `org.bytedeco` jars from
@@ -1632,6 +1714,13 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   A function pointer handed to C as a `jlong` needs no symbol at all, and JNI upcalls go through
   `JNIFunctions`, which is entered from the JNI trampoline rather than from the export table. The
   exported-symbol path stays a round-3 question (`cinterfacetutorial --shared`).
+
+  **Closed (2026-09-18, task 2).** The diagnosis held and the gap is fixed - by round 3, in graal
+  `54969a2cee8`, which passes `exported` through to `createUndefinedSymbol` so that PE/COFF writes
+  a `/EXPORT:` directive for a symbol the *linked* code object defines. Task 2's
+  `tests/programs/export` is the probe that measured it on both sides of that commit (Finding
+  above). It stays a separate program rather than a check inside `complex`: keeping `complex`
+  identical on all three platforms is exactly what made the red export path cost nothing there.
 
 ## Dead ends
 

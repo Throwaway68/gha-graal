@@ -156,9 +156,9 @@ the evidence behind the design decisions recorded in the journal.
 
 | Platform | LLVM toolchain | Sulong (`lli`) | Native Image LLVM backend |
 |----------|----------------|----------------|---------------------------|
-| linux-amd64 | yes | yes | yes (round 2: exceptions, GC, threads), smoke-tested (`--tool:llvm-backend`) |
-| windows-amd64 | yes | yes | yes (round 2: exceptions, GC, threads), smoke-tested on `graal/25.3.4.1-win-llvm` |
-| darwin-aarch64 | yes | yes | yes (round 2: exceptions, GC, threads) on `graal/25.3.4.1-win-llvm`; `graalvm.yml`'s own smoke test has not been run there yet |
+| linux-amd64 | yes | yes | yes (round 2: exceptions, GC, threads; round 4: JNI both ways, exported entry points), smoke-tested (`--tool:llvm-backend`) |
+| windows-amd64 | yes | yes | yes (round 2: exceptions, GC, threads; round 4: JNI both ways, exported entry points), smoke-tested on `graal/25.3.4.1-win-llvm` |
+| darwin-aarch64 | yes | yes | yes (round 2: exceptions, GC, threads; round 4: JNI both ways) on `graal/25.3.4.1-win-llvm`; `graalvm.yml`'s own smoke test has not been run there yet |
 
 Releases of the Windows backend branch, newest first:
 
@@ -188,13 +188,24 @@ platforms, so that crash is unreproduced and unexplained; a throw across an MSVC
 untested (round 4); and the substratevm LLVM gate has not been run on this branch (round 3). The
 journal has the detail for each.
 
-JNI in both directions is covered by `tests/programs/complex` as of 2026-09-18 and is green on
-linux-amd64 (run https://github.com/Throwaway68/gha-graal/actions/runs/35355533926) and on
-darwin-aarch64 (run https://github.com/Throwaway68/gha-graal/actions/runs/35356407402): downcalls
-into a shared library the *bundled* clang builds on the runner, upcalls into the image including
-one whose Java side throws, a `ThrowNew` from C caught in Java, a `@CEntryPoint` entered from C
-through a function pointer, and the same traffic from six threads at once. windows-amd64 is round
-4's open platform.
+JNI in both directions is covered by `tests/programs/complex` as of 2026-09-18 and is green on all
+three platforms - windows-amd64
+([35362505547](https://github.com/Throwaway68/gha-graal/actions/runs/35362505547)), darwin-aarch64
+([35362513762](https://github.com/Throwaway68/gha-graal/actions/runs/35362513762)) and linux-amd64
+([35362521536](https://github.com/Throwaway68/gha-graal/actions/runs/35362521536)), all on graal
+`54969a2cee8`: downcalls into a shared library the *bundled* clang builds on the runner, upcalls
+into the image including one whose Java side throws, a `ThrowNew` from C caught in Java, a
+`@CEntryPoint` entered from C through a function pointer, and the same traffic from six threads at
+once. Windows needed no fix for any of it.
+
+`tests/programs/export` asks the remaining question separately: C resolving a
+`@CEntryPoint(name = ...)` by its *symbol* in the running executable
+(`GetProcAddress(GetModuleHandleA(NULL), ...)` on Windows, `dlsym(RTLD_DEFAULT, ...)` elsewhere).
+That needs the image's export table, which the LLVM backend did not fill on PE/COFF until graal
+`54969a2cee8`; since then it is green on windows-amd64
+([35362529312](https://github.com/Throwaway68/gha-graal/actions/runs/35362529312)) and linux-amd64
+([35362537233](https://github.com/Throwaway68/gha-graal/actions/runs/35362537233)). It is a
+separate program so that `complex` stays identical on every platform.
 
 On darwin-aarch64 the backend works as of 2026-09-18: `hello` prints
 `Hello from the LLVM backend on Mac OS X` and `DEV-RUN OK`
