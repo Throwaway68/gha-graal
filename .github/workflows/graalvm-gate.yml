@@ -171,6 +171,10 @@ jobs:
       - name: Gate (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
+        # The longest green gate so far is 34 min (windows-amd64, `build,helloworld`); 90 leaves
+        # room for the heavier tags and still fails a hung image build long before the job's 240,
+        # so the summary, the artifact and an ssh session are still reached.
+        timeout-minutes: 90
         # Exactly the command line Oracle's CI uses (svm-gate.libsonnet:15-47), plus a tee so that
         # the log is both live in the job and in the artifact. `-e -o pipefail` is the Actions bash
         # default, so a failing gate fails the step through the pipeline's status.
@@ -183,6 +187,7 @@ jobs:
       - name: Gate (Windows)
         if: runner.os == 'Windows'
         shell: cmd
+        timeout-minutes: 90   # as above
         # cmd has no `tee`, so the log is buffered to a file and printed afterwards: the step shows
         # nothing while it runs. With `debug_ssh: true` the session can follow it live
         # (`tail -f "$GITHUB_WORKSPACE/gate.log"`), which is how the Windows failures are worked on.

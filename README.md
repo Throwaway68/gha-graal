@@ -101,7 +101,8 @@ library called through ctypes), `cinterfacetutorial` and `clinittest`, all with 
 `hellomodule` builds and runs three of its four variants on both platforms and cannot build the
 fourth (`-H:+RuntimeClassLoading`): the Ristretto interpreter's bytecode-handler stubs use Graal's
 multi-value return, which the LLVM backend does not implement - on any platform, linux-amd64
-included. The journal has the numbers and the analysis.
+included. How expensive implementing it would be is an open question; the journal has the numbers
+and the analysis.
 
 **Interactive session on the runner.** `-f debug_ssh=true` stops the dev job after `dev-run`, and
 the gate job after the gate, and opens a shell on the runner: tmate on linux/macOS, and on

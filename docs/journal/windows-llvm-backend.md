@@ -349,8 +349,8 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
 
   **`hellomodule` is not green and cannot be, on any platform.** Its fourth variant
   (`-H:+RuntimeClassLoading -H:+AllowJRTFileSystem`) pulls in the Ristretto interpreter, whose
-  bytecode-handler stubs use Graal's multi-value return; the LLVM backend does not implement it and
-  cannot without a new calling-convention behaviour in the toolchain. linux-amd64 fails exactly like
+  bytecode-handler stubs use Graal's multi-value return, which the LLVM backend does not implement
+  (how expensive implementing it is, is a hypothesis - see the finding). linux-amd64 fails exactly like
   windows-amd64 (runs 35350001924 and 35350012194, and at this milestone's commit
   https://github.com/Throwaway68/gha-graal/actions/runs/35367142767, 13m20s, dying in
   `Interpreter$Root.__stub_aaloadHandler`). The other three variants build and run under the backend
@@ -1374,17 +1374,35 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
 
   identically on linux-amd64 and windows-amd64, and identically on the pristine upstream tag
   `graal-25.3.4.1` (run 35348465578) - but the same tag with the same tags and *without*
-  `--tool:llvm-backend` is green (run 35350022257, 11m41s). So it is the backend, not the version:
-  hypothesis (strongly supported, not proven to the node count) - `LLVMFeature` installs
-  `LLVMGraphBuilderPlugins` as the `TargetGraphBuilderPlugins` singleton, a much smaller set than
-  the AMD64 one, so `String.equals` is not intrinsified, its graph is no longer trivial for
-  `CompileQueue`'s trivial inliner, the call survives into the compilation graph and
+  `--tool:llvm-backend` is green (run 35350022257, 11m41s). So it is the backend, not the version,
+  and the mechanism is in the source: `java.lang.String.equals` is intrinsified by
+  `StandardGraphBuilderPlugins.StringEqualsInvocationPlugin`, which is registered only
+  `if (supportsStubBasedPlugins)` (`registerStringPlugins`,
+  `compiler/.../replacements/StandardGraphBuilderPlugins.java:543-545`), and SVM computes that flag
+  as `!SubstrateOptions.useLLVMBackend()` (`NativeImageGenerator.isStubBasedPluginsSupported`, :1647,
+  and `RuntimeCompilationFeature`:459). With the backend on, the plugin is not registered, the call
+  to `String.equals` survives into the compilation graph, and
   `UninterruptibleAnnotationChecker.checkCallees` - which reads
-  `method.compilationInfo.getCompilationGraph()` - reports it. Fixed on the branch in `979f76f9073`
-  by calling `UninterruptibleUtils.String.equals`, the uninterruptible comparison SVM already has
-  (with a null guard: `String.equals` tolerates a null argument and that helper does not, and
-  `FrameInfoQueryResult.getSourceMethodName()` can be null). Expect more of these wherever
-  uninterruptible code calls a JDK method that only the platform backends intrinsify.
+  `method.compilationInfo.getCompilationGraph()` - reports it. (It is the *stub-based* plugin
+  switch, not the target plugins: neither `AMD64GraphBuilderPlugins` nor the backend's own
+  `LLVMGraphBuilderPlugins` registers String plugins at all, so an earlier version of this entry
+  blamed the wrong class.) Fixed on the branch in `979f76f9073` by calling
+  `UninterruptibleUtils.String.equals`, the uninterruptible comparison SVM already has (with a null
+  guard: `String.equals` tolerates a null argument and that helper does not, and
+  `FrameInfoQueryResult.getSourceMethodName()` can be null).
+
+  **What Task 2 should expect from this.** Everything behind `supportsStubBasedPlugins` is missing
+  under the backend, not just String comparison: `registerStringPlugins`' `String.equals`, the
+  `registerArraysPlugins` array equality and vectorized mismatch intrinsics, AES, CRC, GHASH,
+  ChaCha20 and the other stub-based registrations in
+  `StandardGraphBuilderPlugins.registerInvocationPlugins` (:323 ff.). Any uninterruptible method
+  that stays clean only because one of those folds away will fail the same check, and any test that
+  depends on such an intrinsic is slower or differently shaped under the backend.
+
+  **Note on the fix's commit message (2026-09-18, after the control run):** `979f76f9073` says the
+  failure happens "with and without `--tool:llvm-backend`". That was the hypothesis at the time and
+  it is **wrong** - run 35350022257 refutes it. The branch is never force-pushed, so the message
+  stays as it is; this entry is the correction. See also the Dead ends entry for H1.
 
 - 2026-09-18 (round 3, task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35350001924,
   graal `979f76f9073`): **the Ristretto interpreter's bytecode-handler stubs need multi-value
@@ -1404,12 +1422,18 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `ReturnNode.generate` turns a `MultiReturnNode` into `emitMultiReturns`, whose default
   implementation moves the additional results into the *argument* registers of the calling
   convention (`getResult().getCallingConvention()`) and can also emit a tail call. The LLVM backend
-  has no `LIRGenerationResult` at all, and neither the register assignment of the extra results nor
-  the tail call is expressible in LLVM IR without a new calling-convention behaviour in the
-  toolchain - i.e. an LLVM patch and a rebuild. **Not Windows-specific and not new in this branch:
-  it is on linux-amd64 too, and it blocks the fourth `hellomodule` variant on every platform.** The
-  other three variants build and run under the backend on both platforms (see the milestone below).
-  Out of reach for round 3 task 1; recorded for the controller to schedule.
+  has no `LIRGenerationResult` at all, which is what the abort says. **Not Windows-specific and not
+  new in this branch: it is on linux-amd64 too, and it blocks the fourth `hellomodule` variant on
+  every platform.** The other three variants build and run under the backend on both platforms (see
+  the milestone above). Out of reach for round 3 task 1; recorded for the controller to schedule.
+
+  *Hypothesis about the cost, not measured:* the two flavours are probably not equally hard. A stub
+  that ends in a tail call may well be expressible in plain LLVM IR - a `musttail` call with the
+  matching signature, which the backend already has the machinery to emit - while the flavour that
+  hands results back **in the caller's argument registers** has no IR-level spelling and would need
+  a calling convention that says so, i.e. an LLVM patch and a rebuild. Whoever picks this up should
+  check which flavour these stubs actually use before assuming the expensive one; the abort happens
+  in `getResult()` for both, so the log does not say.
 
 - 2026-09-18 (round 3, task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35348125338):
   **the `helloworld` tag's last task needs the Python module `jsonschema`.** After every image of
@@ -1619,3 +1643,38 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `addMainFunction` puts every function on the Graal calling convention. The frame was
   `JavaMainWrapper.run` only because it is one call long and that call sits in front of the
   epilogue.
+
+- 2026-09-18 (round 3, task 1, refuted by run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35350022257): **H1, "the `@Uninterruptible`
+  violation in `hellomodule` is an upstream bug in graal-25.3.4.1 and has nothing to do with the
+  backend"**. The evidence for it looked strong: the source is untouched by this branch, the
+  offending commit `34bb007fab8` is inside the upstream tag, the check runs in `CompileQueue.finish`
+  long before any backend code generation, the failure is byte-identical on linux-amd64 and
+  windows-amd64, and the pristine tag fails too (run 35348465578). All of that is true and the
+  conclusion was still wrong: the pristine tag with the *same* tags and **without**
+  `--tool:llvm-backend` is green (35350022257). What the identical-on-both-platforms evidence
+  actually showed is that the cause is platform-independent - which a backend-wide plugin switch is
+  too. The fix `979f76f9073` was written under H1 and its commit message still says so; the Finding
+  above has the real mechanism (`supportsStubBasedPlugins`). Lesson for the rest of the round: the
+  "does it also happen without the backend" control is one 13-minute run and it is the only thing
+  that separates an upstream bug from a backend one.
+
+- 2026-09-18 (round 3, task 1, runs
+  https://github.com/Throwaway68/gha-graal/actions/runs/35348112827 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35348465578): **two "backend off" control
+  runs that were nothing of the sort.** Both were dispatched with
+  `gh workflow run ... -f extra_image_builder_args=`, which does **not** send an empty string - the
+  input keeps its `workflow_dispatch` default, so both ran with `--tool:llvm-backend` after all, and
+  for half an hour they were read as "it fails without the backend too", i.e. as confirmation of H1.
+  Visible in the artifact all along: `gate-summary.txt`'s `last mx command:` line shows the flags the
+  gate really used. The control had to be redone with a harmless non-empty value
+  (`-f extra_image_builder_args=-H:+ReportExceptionStackTraces`, run 35350022257). Check the summary's
+  command line before believing a control run.
+
+- 2026-09-18 (round 3, task 1, runs
+  https://github.com/Throwaway68/gha-graal/actions/runs/35349177616 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35349190625): **an abbreviated graal SHA as
+  `graal_ref`.** `-f graal_ref=979f76f9073` looks like a perfectly good ref and cost two runs: both
+  died after 41 s and 59 s in `Checkout graal` with `The process '/usr/bin/git' failed with exit
+  code 1`, because `actions/checkout` fetches a commit by its full name. Pass all 40 characters (or
+  a branch).

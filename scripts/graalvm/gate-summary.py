@@ -20,7 +20,10 @@ while the exception that killed the task is still propagating; only the outermos
 `Gate`, gets an `ABORT:` line (`total.abort(...)` in `mx_gate.gate`). Verified on run
 35346576305, where `module build demo` printed `END:` and the gate failed inside it. So the rule
 here is: if the gate aborted, the task that failed is the last one that began, and the ones
-before it passed.
+before it passed. That rule also attributes an abort *between* two tasks - a `--tags` typo,
+`--strict-mode` refusing a tool, a suite runner that throws outside a `with Task(...)` - to the last
+task that began, which is then blamed for something it did not do; the `last mx command:` line and
+the log itself say which it was.
 
 Deliberately driven by BEGIN/END/ABORT rather than by mx's own `Gate task times:` section: a gate
 that is killed - job timeout, a hung image build, a runner that went away - never prints that
