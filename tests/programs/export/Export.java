@@ -20,7 +20,7 @@ public class Export {
         if (!ok) failures++;
     }
 
-    /** Resolves EXPORTED_NAME in the running executable and calls it with (thread, 40, 2). */
+    /** Resolves gha_export_add in the running executable and calls it with (thread, 40, 2). */
     static native long callExported(long thread);
 
     @CEntryPoint(name = "gha_export_add")

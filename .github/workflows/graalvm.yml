@@ -150,8 +150,9 @@ jobs:
         run: |
           bash ci/scripts/graalvm/smoke.sh "$GRAALVM_HOME" "$GITHUB_WORKSPACE/smoke"
           # smoke.sh stops at a hello world. Where the LLVM backend is registered,
-          # also build and run tests/programs/stress, which is what tells us the
-          # backend survives exceptions, the GC and threads.
+          # also build and run tests/programs/{stress,complex,export}: the runtime
+          # (exceptions, GC, threads), JNI in both directions against a library the
+          # bundled clang builds here, and an entry point resolved by its symbol.
           if [ -d "$GRAALVM_HOME/lib/svm/tools/llvm-backend" ] || [ -d "$GRAALVM_HOME/lib/svm/macros/llvm-backend" ]; then
             bash ci/scripts/graalvm/smoke-stress.sh "$GRAALVM_HOME" "$GITHUB_WORKSPACE/stress"
           fi
@@ -217,7 +218,7 @@ jobs:
           GraalVM CE built from \`Throwaway68/graal@${{ inputs.graal_ref }}\` with the LLVM toolchain from release \`${{ inputs.llvm_release }}\`.
           Platforms in this release: ${{ inputs.platforms }}.
           Components: CE base, LLVM.org toolchain, Sulong (LLVM runtime), Native Image LLVM backend where the branch registers it.
-          Native Image LLVM backend: linux-amd64 and windows-amd64 build and run \`tests/programs/stress\` (exceptions, GC, threads) in this run's smoke test; darwin-aarch64 is registered but not yet green (see journal).
+          Native Image LLVM backend: every platform of this release builds and runs \`tests/programs/stress\` (exceptions, GC, threads), \`tests/programs/complex\` (JNI in both directions plus a \`@CEntryPoint\` entered from C through a function pointer) and \`tests/programs/export\` (a \`@CEntryPoint\` resolved by its symbol) with \`--tool:llvm-backend\` in this run's smoke test.
           The Windows backend needs \`llvm-22.1.8-graal.3\` or newer: it carries the Win64 home-space fix for \`CallingConv::GRAAL\` and libunwind for \`x86_64-w64-windows-gnu\`.
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
