@@ -26,8 +26,9 @@ function Write-LfFile([string]$Path, [string[]]$Lines) {
 $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
 Log "OpenSSH.Server capability $($cap.Name): $($cap.State)"
 if ($cap.State -ne 'Installed') {
-  # Bounded. The runner image ships the capability, so a DISM install that drags on means the image
-  # changed; the way out then is MSYS2's openssh package (see the journal entry for this script).
+  # The windows-2022 image does not ship it; the install measures 40 s. Bounded all the same, so
+  # that a DISM call that hangs cannot eat the step's timeout - the way out is then MSYS2's openssh
+  # package (see the journal entry for this script).
   $job = Start-Job { param($n) Add-WindowsCapability -Online -Name $n } -ArgumentList $cap.Name
   if (-not (Wait-Job $job -Timeout 180)) {
     Stop-Job $job
@@ -42,8 +43,10 @@ $keys = @((Invoke-WebRequest -UseBasicParsing "https://github.com/$Actor.keys").
 if (-not $keys) { throw "no public keys on github.com/$Actor; the session would be unusable" }
 Log "$($keys.Count) public key(s) from github.com/$Actor"
 
+# StartupType first: a freshly installed capability can leave the service disabled, and
+# Start-Service then refuses. The first start writes the default sshd_config and the host keys.
 Set-Service -Name sshd -StartupType Manual
-Start-Service sshd    # the first start writes the default sshd_config and generates the host keys
+Start-Service sshd
 Stop-Service sshd
 
 # sshd_config ends in a `Match Group administrators` block that points AuthorizedKeysFile at

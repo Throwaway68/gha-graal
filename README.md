@@ -60,6 +60,34 @@ files, and saved right after the build so that a job failing at `dev-run` still 
 decides what to rebuild from file timestamps and a checkout stamps every source with the time of
 the run - the workflow comments and the journal have the numbers.
 
+**Interactive session on the Windows runner.** `-f debug_ssh=true` stops the dev job after `dev-run`
+and opens a shell on the runner: tmate on linux/macOS, and on windows-amd64 the Windows OpenSSH
+server behind a cloudflared quick tunnel (`scripts/graalvm/win-ssh.ps1`), because tmate's action
+hangs on windows-2022.
+
+    gh workflow run graalvm-dev.yml -f platform=windows-amd64 -f program=hello -f debug_ssh=true
+    gh run download <run-id> -n ssh-windows-amd64     # ~10 min after the dispatch, once the build is through
+    ssh -i ~/.ssh/<your key> -o ProxyCommand="cloudflared access tcp --hostname %h" \
+        -o StrictHostKeyChecking=no runneradmin@<the hostname from address.txt>
+
+The artifact is `ssh-<platform>` on Windows and `tmate-<platform>` on linux/macOS (the log cannot be
+read through the API while the job runs, so the address travels as an artifact). Its `address.txt`
+holds the trycloudflare hostname, that exact ssh command, and the hold file. Only the public keys of
+the GitHub account that dispatched the run are authorized, so that account needs one at
+https://github.com/settings/keys and you need the matching private key; the local end needs
+`cloudflared` (`brew install cloudflared`). The shell is Git bash, starts in `$GITHUB_WORKSPACE` and
+carries the job's environment - `cl`, `link`, `$GRAALVM_HOME`, `$JAVA_HOME`, `$MX_PATH/mx` - for
+interactive logins and for `ssh <host> '<command>'` alike, so another build of the same program is
+
+    bash ci/scripts/graalvm/dev-run.sh "$GRAALVM_HOME" ci/tests/programs/hello "$GITHUB_WORKSPACE/work2"
+
+The job waits in its hold step until you end the session with `rm "$RUNNER_TEMP/gha-hold"`, then
+finishes normally and still uploads `dev-<platform>-<program>`; unattended it holds for 180 minutes
+at most. If `cloudflared` answers `lookup ... no such host`, your resolver filters
+`*.trycloudflare.com` - some ISP resolvers do; one way out without touching the system resolver is to
+run the client in a container: `-o ProxyCommand="docker run -i --rm --dns 8.8.8.8
+cloudflare/cloudflared access tcp --hostname %h"`.
+
 **Shadowed jars** (`jars.yml`): `gh workflow run jars.yml -f version=1.5.7-graal.1`.
 Rebuilds the JavaCPP 1.5.7 and LLVM 13.0.1-1.5.7 **windows-x86_64** platform jars from
 Maven Central as graal-style *shadowed* jars (`org.bytedeco` relocated to

@@ -164,6 +164,37 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   asset uploaded on its own (all three succeeded on attempt 1/6), verified by published size and
   `state == uploaded`, then `gh release edit --draft=false`.
 
+- 2026-09-18: **interactive ssh on windows-2022 works** (round 2, task 1). `debug_ssh: true` now
+  opens a real session on the Windows runner - the Windows OpenSSH server behind a cloudflared quick
+  tunnel, `scripts/graalvm/win-ssh.ps1` - instead of the warning that said there is none.
+  End-to-end run https://github.com/Throwaway68/gha-graal/actions/runs/35325615444 (windows-amd64,
+  `hello`, `debug_ssh=true`, green): job start 08:41:01Z, build 8m22s, `dev-run` 1m36s, the ssh step
+  50 s, artifact `ssh-windows-amd64` uploaded at 08:53:19Z - **12m18s from dispatch to a usable
+  shell**, of which the session setup is under a minute; the rest is the build the session is there
+  to debug. In that session, from the Mac:
+
+  ```
+  $ ssh -i <key> -o ProxyCommand="cloudflared access tcp --hostname %h" runneradmin@<host> \
+      'cd "$GITHUB_WORKSPACE" && "$GRAALVM_HOME/bin/native-image.cmd" --version && cl 2>&1 | head -1 \
+       && ls work && bash ci/scripts/graalvm/dev-run.sh "$GRAALVM_HOME" ci/tests/programs/hello "$GITHUB_WORKSPACE/work2"'
+  native-image 25.0.4.1 2026-08-18
+  GraalVM Runtime Environment GraalVM CE 25.3.4.1-dev+1.1 (build 25.0.4.1+1-jvmci-25.3-b22)
+  Substrate VM GraalVM CE 25.3.4.1-dev+1.1 (build 25.0.4.1+1, serial gc, compressed references)
+  Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64
+  app.exe classes stderr.txt stdout.lf stdout.txt tmp
+  ...
+  Finished generating 'app' in 1m 28s.
+  Hello from the LLVM backend on Windows Server 2022
+  DEV-RUN OK
+  ```
+
+  The second `dev-run` took 1m37s of wall time end to end, against 1m36s for the job's own `dev-run`
+  step - an iteration inside the session costs what the step costs, and saves the 8m22s build. `rm
+  "$RUNNER_TEMP/gha-hold"` ended the hold (08:56:36Z) and the job finished green and still uploaded
+  `dev-windows-amd64-hello`. The mechanism was spiked green on the first attempt in run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35325048211 (the throwaway spike workflow is
+  deleted again); what it takes is in Findings below.
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -830,6 +861,50 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   - the Windows native-image **"2 warnings"** nobody has read yet: retrieve them from a
     `graalvm-dev.yml` run's work-dir artifact (`work/stdout.txt` / `work/stderr.txt`).
 
+- 2026-09-18 (round 2, task 1, spike run https://github.com/Throwaway68/gha-graal/actions/runs/35325048211):
+  **what an ssh session on windows-2022 needs.** `scripts/graalvm/win-ssh.ps1` sets it up in 51 s and
+  the pieces are all load-bearing:
+
+  - **The OpenSSH server is a Windows capability, and it is not preinstalled.**
+    `Get-WindowsCapability -Online -Name OpenSSH.Server*` says `NotPresent` on the
+    windows-2022 image, and `Add-WindowsCapability` takes **40 s** - fast enough that the MSYS2
+    `pacman -S openssh` fallback the plan allowed was never needed. The script still bounds the
+    install at 180 s (a `Start-Job` plus `Wait-Job -Timeout`) and names the fallback in the error,
+    because a DISM install that hangs would otherwise eat the step's whole timeout.
+  - **`administrators_authorized_keys`, not `~/.ssh/authorized_keys`.** The default sshd_config ends
+    in a `Match Group administrators` block that redirects `AuthorizedKeysFile` to
+    `C:\ProgramData\ssh\administrators_authorized_keys`, and `runneradmin` is an administrator, so
+    keys in the home directory are ignored. sshd also refuses the file unless it is owned by
+    Administrators/SYSTEM alone, hence the `icacls /inheritance:r` line. The keys themselves are the
+    dispatching account's (`https://github.com/<actor>.keys`), the same rule as tmate's
+    `limit-access-to-actor`.
+  - **`DefaultShell` needs `DefaultShellCommandOption` beside it.** `HKLM:\SOFTWARE\OpenSSH\DefaultShell`
+    = Git bash gives `MINGW64_NT-10.0-20348 ... x86_64 Msys` as the login shell, but sshd builds a
+    non-interactive `ssh <host> '<command>'` as `<shell> <DefaultShellCommandOption> <command>`,
+    which defaults to cmd.exe's `/c` - bash would treat that as a file name. With `-c` (and
+    `DefaultShellEscapeArguments` 0, so quotes survive) both session kinds work.
+  - **sshd is a service and inherits nothing from the step.** The MSVC variables, `GRAALVM_HOME`,
+    `JAVA_HOME`, `MX_PATH`, `MX_URLREWRITES` and `GITHUB_WORKSPACE` are dumped into
+    `~/.gha-env.sh`, which `.bashrc`/`.bash_profile` source for interactive logins and a
+    machine-wide **`BASH_ENV`** (set before sshd starts, so sshd's children inherit it) sources for
+    `ssh <host> '<command>'`, which reads neither dot file. The file is guarded by an exported
+    `GHA_ENV_SOURCED`, because `BASH_ENV` fires again in every subshell - `dev-run.sh` alone would
+    otherwise re-prepend the whole PATH a dozen times.
+  - **PATH is the one variable that cannot be copied verbatim, and CRLF cannot be used at all.**
+    A `shell: bash` step gets the POSIX form of the Windows PATH because the MSYS runtime converts
+    what it inherits; an `export PATH='C:\...;C:\...'` written from inside bash is not converted, and
+    the session then has not even `ls`. The script hands the Windows list to `cygpath -up` instead.
+    Every file it writes is LF and BOM-free (`[IO.File]::WriteAllText`): a CR ends up *inside* the
+    value of the line it terminates, so `export FOO='bar'` would export `bar\r`;
+    `administrators_authorized_keys` is written the same way rather than trusting sshd to shrug a
+    stray CR off.
+  - **cloudflared quick tunnel, no inbound port.** `cloudflared tunnel --url tcp://localhost:22`
+    publishes `https://<name>.trycloudflare.com` in its log after ~3 s; the local end reaches it with
+    `ssh -o ProxyCommand='cloudflared access tcp --hostname %h'`. The hostname goes into artifact
+    `ssh-<platform>`, not into the log, because a job's log is not readable through the API while the
+    job runs - the same reason the tmate block publishes an artifact.
+
+
 ## Decisions
 
 - 2026-09-17 (controller ruling, task 6): **this branch uses the stock `org.bytedeco` jars from
@@ -911,4 +986,14 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
 
 ## Dead ends
 
-- (none yet)
+- 2026-09-18 (task 1): a throwaway `win-ssh-spike.yml` could not be dispatched at all -
+  `gh workflow run` and the REST dispatch both answer `HTTP 404: workflow win-ssh-spike.yml not
+  found on the default branch`, because `workflow_dispatch` only exists for workflows that are on
+  the default branch. The spike ran on `on: push` to `round2-ssh` with a `paths:` filter instead,
+  which is what a throwaway wants anyway: one push of the script = one iteration.
+- 2026-09-18 (task 1): the first `ssh -o ProxyCommand='cloudflared access tcp --hostname %h'` from
+  the Mac died with `dial tcp: lookup <name>.trycloudflare.com: no such host` - not the tunnel's
+  fault: the local resolver NXDOMAINs subdomains of `trycloudflare.com` (`dig @8.8.8.8` answers,
+  the router does not), as several ISP resolvers now do. Worked around by running the client end in
+  a container with its own resolver (`docker run -i --rm --dns 8.8.8.8 cloudflare/cloudflared access
+  tcp --hostname %h` as the ProxyCommand); noted in the README.
