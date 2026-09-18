@@ -351,8 +351,10 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   (`-H:+RuntimeClassLoading -H:+AllowJRTFileSystem`) pulls in the Ristretto interpreter, whose
   bytecode-handler stubs use Graal's multi-value return; the LLVM backend does not implement it and
   cannot without a new calling-convention behaviour in the toolchain. linux-amd64 fails exactly like
-  windows-amd64 (runs 35350001924 and 35350012194). The other three variants build and run under the
-  backend on both platforms - a Java *module* image on the Windows LLVM backend works.
+  windows-amd64 (runs 35350001924 and 35350012194, and at this milestone's commit
+  https://github.com/Throwaway68/gha-graal/actions/runs/35367142767, 13m20s, dying in
+  `Interpreter$Root.__stub_aaloadHandler`). The other three variants build and run under the backend
+  on both platforms - a Java *module* image on the Windows LLVM backend works.
 
 
 ## Findings
