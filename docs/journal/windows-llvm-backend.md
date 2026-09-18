@@ -1574,13 +1574,28 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   turned out to be non-issues. The bundled clang builds the JNI library with
   `--target=x86_64-pc-windows-msvc -fuse-ld=lld -shared -I<home>/include -I<home>/include/win32`
   under `ilammy/msvc-dev-cmd` (it picks the MSVC and UCRT headers up from `%INCLUDE%` and
-  `lld-link` picks the import libraries up from `%LIB%`), its default CRT choice matches the
-  image's `/MD`, `JNIEXPORT` = `__declspec(dllexport)` is all the DLL's exports need, and
+  `lld-link` picks the import libraries up from `%LIB%`), `JNIEXPORT` = `__declspec(dllexport)`
+  is all the DLL's exports need, and
   `-Dcomplex.lib=D:/a/gha-graal/gha-graal/work/complex.dll` - the `pwd -W` form - is a path
   `System.load` accepts. All sixteen checks and `COMPLEX OK` on the first attempt, i.e. JNI in
   both directions works on Windows under the LLVM backend: downcalls, upcalls, an upcall whose
   Java side throws, a `ThrowNew` caught in Java, a six-argument `@CEntryPoint` entered from C
   through a function pointer, and the same traffic from six threads at once.
+
+  **Correction (task 3).** The first version of this entry said the DLL's "default CRT choice
+  matches the image's `/MD`". It does not. The plain `clang` driver targeting
+  `x86_64-pc-windows-msvc` links the **static** CRT: `clang --target=x86_64-pc-windows-msvc
+  -shared -### x.c` puts `-defaultlib:libcmt` and `-defaultlib:oldnames` on the `lld-link` line,
+  while the image is linked by `WindowsCCLinkerInvocation` with `cl.exe /MD`, i.e. against the
+  dynamic one. So `complex.dll` carries its own CRT and the process has two. It works because
+  nothing CRT-owned crosses the JNI boundary: everything the C side exchanges with the image goes
+  through `JNIEnv` (`GetStringUTFChars`/`ReleaseStringUTFChars`,
+  `Get/ReleaseIntArrayElements`, `NewStringUTF`), each CRT object is allocated and released on the
+  same side, and no `malloc`/`free` pair, `FILE*`, `errno` or locale handle is ever split between
+  the two. A library that did hand such a handle across would have to be built against the same
+  dynamic CRT the image links. Reasoned from the driver's `-###` output rather than measured on
+  the runner - no Windows session was open when this was written; `dumpbin /dependents
+  complex.dll` on a runner would settle it directly.
 
 - 2026-09-18 (task 2, same ssh session, graal `5f21e16095b` then `54969a2cee8`): **the Windows
   export gap was real, and round 3's PE/COFF export fix closes it for executables as well as for
@@ -1721,6 +1736,16 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `tests/programs/export` is the probe that measured it on both sides of that commit (Finding
   above). It stays a separate program rather than a check inside `complex`: keeping `complex`
   identical on all three platforms is exactly what made the red export path cost nothing there.
+
+  One premise of the decision was too strong, though, and the fix is what shows it: an export does
+  **not** need the *defining* object to carry the `/EXPORT:` directive. `/EXPORT:<name>` in the
+  `.drectve` of any object on the link line is enough - the linker takes it as a request and
+  resolves the name against whichever input defines it. That is precisely the room `54969a2cee8`
+  uses: `app.obj` only declares `gha_export_add` (undefined) and carries the directive, `llvm.obj`
+  defines the code, and the image exports it. The accurate statement of the gap is therefore
+  narrower than the decision's: nothing *anywhere* in the link emitted a `/EXPORT:` for an image
+  entry point, because `defineMethodSymbol` dropped the `exported` flag on the way into the image
+  object - not that the directive had to come from the object holding the code.
 
 ## Dead ends
 

@@ -115,9 +115,9 @@ lib=$(sed -n 's/.* -o \(.*\)$/\1/p' "$CLANG_LOG"); [ -f "$lib" ] || { echo "FAIL
 grep -qF -- "app -Dx.lib=$lib" "$APP_LOG" || { cat "$APP_LOG"; echo "FAIL: the image was not run with -Dx.lib=<library>"; exit 1; }
 grep -q -- '--add-modules org.graalvm.nativeimage' "$JAVAC_LOG" || { cat "$JAVAC_LOG"; echo "FAIL: javac.flags not passed to javac"; exit 1; }
 [ -f "$T/work7/classes/META-INF/native-image/gha-graal/x/jni-config.json" ] || { echo "FAIL: META-INF not copied to the classpath"; exit 1; }
-# The Windows and Linux clang branches are unreachable on the host that usually runs this test, so
-# `uname -s` is overridden the same way `pwd -W` is above. Each host then checks all three branches
-# instead of only its own - a wrong flag on the Windows branch is otherwise invisible until CI.
+# Two of the three clang branches are unreachable on any given host, so `uname -s` is overridden
+# the same way `pwd -W` is above and all three are simulated. Each host therefore checks every
+# branch, not only its own - a wrong flag on the Windows branch is otherwise invisible until CI.
 uname() { if [ "${1:-}" = "-s" ]; then echo "$FAKE_UNAME_S"; else command uname "$@"; fi; }
 export -f uname
 export FAKE_UNAME_S=MINGW64_NT-10.0-22621
@@ -136,6 +136,18 @@ if [ "$(bash -c 'uname -s' 2>/dev/null)" = "$FAKE_UNAME_S" ]; then
     grep -qF -- "$flag" "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: Linux clang line lacks $flag"; exit 1; }
   done
   grep -qE -- '-o [^ ]*/libx\.so$' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: Linux library is not lib<program>.so"; exit 1; }
+  export FAKE_UNAME_S=Darwin CLANG_LOG=$T/clang.darwin.log
+  out=$(bash scripts/graalvm/dev-run.sh "$H4" "$T/nat/x" "$T/work.darwin" 2>&1) \
+    || { rc=$?; echo "$out"; echo "FAIL: dev-run exited $rc on the simulated Darwin host"; exit 1; }
+  for flag in -dynamiclib "-I$H4/include/darwin"; do
+    grep -qF -- "$flag" "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: Darwin clang line lacks $flag"; exit 1; }
+  done
+  grep -qE -- '-o [^ ]*/libx\.dylib$' "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: Darwin library is not lib<program>.dylib"; exit 1; }
+  # The sysroot is only asserted where xcrun can produce one; dev-run.sh drops -isysroot
+  # elsewhere on purpose, so that the Darwin branch is still exercisable off macOS.
+  if sdk=$(xcrun --show-sdk-path 2>/dev/null) && [ -n "$sdk" ]; then
+    grep -qF -- "-isysroot $sdk" "$CLANG_LOG" || { cat "$CLANG_LOG"; echo "FAIL: no macOS sysroot on the simulated Darwin clang line"; exit 1; }
+  fi
   export CLANG_LOG=$T/clang.log
 else
   echo "note: exported-function override unavailable here, skipping the per-platform clang flag checks"

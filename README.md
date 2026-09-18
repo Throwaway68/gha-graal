@@ -205,7 +205,10 @@ That needs the image's export table, which the LLVM backend did not fill on PE/C
 `54969a2cee8`; since then it is green on windows-amd64
 ([35362529312](https://github.com/Throwaway68/gha-graal/actions/runs/35362529312)) and linux-amd64
 ([35362537233](https://github.com/Throwaway68/gha-graal/actions/runs/35362537233)). It is a
-separate program so that `complex` stays identical on every platform.
+separate program so that `complex` stays identical on every platform. On **darwin-aarch64 it has
+not run in CI at all** yet - only locally, and there with the stock backend rather than the LLVM
+one; the round 4 release's smoke test is its first run on that platform (this paragraph is updated
+with the result once that release exists).
 
 On darwin-aarch64 the backend works as of 2026-09-18: `hello` prints
 `Hello from the LLVM backend on Mac OS X` and `DEV-RUN OK`
