@@ -128,7 +128,7 @@ is a property of the backend, not of Windows, and not one of this round's fixes 
 | `condconfig` | [35380326588](https://github.com/Throwaway68/gha-graal/actions/runs/35380326588) 10m08s | [35380377849](https://github.com/Throwaway68/gha-graal/actions/runs/35380377849) 7m48s | green |
 | `java_agent` | [35380333677](https://github.com/Throwaway68/gha-graal/actions/runs/35380333677) 15m24s | [35380385079](https://github.com/Throwaway68/gha-graal/actions/runs/35380385079) 13m38s | green |
 | `java_desktop_integration` | [35378067180](https://github.com/Throwaway68/gha-graal/actions/runs/35378067180) 43m26s | [35378074436](https://github.com/Throwaway68/gha-graal/actions/runs/35378074436) 18m07s | green |
-| `truffle_unittests` | [35380341570](https://github.com/Throwaway68/gha-graal/actions/runs/35380341570) | [35380392612](https://github.com/Throwaway68/gha-graal/actions/runs/35380392612) | **known gap on both platforms** |
+| `truffle_unittests` | [35380341570](https://github.com/Throwaway68/gha-graal/actions/runs/35380341570) 6m59s | [35380392612](https://github.com/Throwaway68/gha-graal/actions/runs/35380392612) 3m09s | **known gap on both platforms** |
 | `hellomodule` | - | - | **known gap on both platforms** |
 | `debuginfotest`, standalone pointsto | - | - | skipped on Windows by `svm_gate_body` |
 
@@ -146,6 +146,17 @@ Tests that cannot run under the backend are listed with their reason in
 `substratevm/mx.substratevm/llvm-unittest-blacklist` on the graal branch; `mx native-unittest` uses
 that file only when the build arguments contain `--tool:llvm-backend` and the caller passed no
 `--blacklist` of its own, so a build without the backend runs exactly the same tests as before.
+
+The gate has never been run on darwin-aarch64 - `graalvm-gate.yml` offers it as a `platform`, but
+every row above is windows-amd64 with linux-amd64 as the reference. Two numbers to know before
+dispatching: `all_native_unittests` costs about an hour per batch on windows-amd64 (55m43s and
+55m00s above), which is why each `--partial` batch is its own dispatch and the gate step's timeout
+is 180 minutes; and 32m06s of the `java.desktop` junit image's 37m20s is `[7/8] Laying out
+methods`, i.e. one `llvm-link` plus one `llc` over the whole image, because PE/COFF has no
+relocatable link and the backend therefore uses a single bitcode batch there (linux-amd64
+parallelises the same work across `numThreads` batches). The heartbeat in graal `ffcc40a2601` keeps
+the image generator's watchdog from killing that link; the wall time is real and grows with image
+size.
 
 **Interactive session on the runner.** `-f debug_ssh=true` stops the dev job after `dev-run`, and
 the gate job after the gate, and opens a shell on the runner: tmate on linux/macOS, and on
@@ -223,12 +234,25 @@ the evidence behind the design decisions recorded in the journal.
 
 | Platform | LLVM toolchain | Sulong (`lli`) | Native Image LLVM backend |
 |----------|----------------|----------------|---------------------------|
-| linux-amd64 | yes | yes | yes - `stress` (exceptions, GC, threads), `complex` (JNI both ways) and `export` (an entry point resolved by its symbol) in the round 4 release's own smoke test |
-| windows-amd64 | yes | yes | yes, on `graal/25.3.4.1-win-llvm` - same three programs in the round 4 release's own smoke test |
-| darwin-aarch64 | yes | yes | yes, on `graal/25.3.4.1-win-llvm` - same three programs in the round 4 release's own smoke test (first release to carry this platform) |
+| linux-amd64 | yes | yes | yes - `stress` (exceptions, GC, threads), `complex` (JNI both ways) and `export` (an entry point resolved by its symbol) in the round 3 and round 4 releases' own smoke tests |
+| windows-amd64 | yes | yes | yes, on `graal/25.3.4.1-win-llvm` - same three programs in the round 3 and round 4 releases' own smoke tests |
+| darwin-aarch64 | yes | yes | yes, on `graal/25.3.4.1-win-llvm` - same three programs in the round 3 and round 4 releases' own smoke tests (round 4's was the first release to carry this platform) |
 
 Releases of the Windows backend branch, newest first:
 
+- [`graalvm-round3-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round3-win-llvm):
+  `graal/25.3.4.1-win-llvm` at `fb017323af7` against `llvm-22.1.8-graal.3`, **all three platforms**
+  (run [35389184556](https://github.com/Throwaway68/gha-graal/actions/runs/35389184556), 43m53s,
+  green on the first try). This is the newest release of the branch although its round number is
+  lower: rounds 3 and 4 ran side by side, and it is seven graal commits ahead of round 4's
+  `54969a2cee8`. Round 3 is the **substratevm gate** - `graalvm-gate.yml` runs Oracle's `basics`
+  tags under the backend, and seven of the eight tags the round set out to make green on
+  windows-amd64 are green at this commit (the table above). What this release carries beyond
+  round 4: the image generator's watchdog heartbeat, which keeps the single PE/COFF `llvm-link` of a
+  large image from being killed; `Math.rint` through `nearbyint`, because MSVC's UCRT has no
+  `roundeven`; the LLVM unittest blacklist and the harness changes around it; and the `condconfig`
+  svmbuild fix. Its own smoke test is round 4's, unchanged - `stress`, `complex` and `export` on
+  every platform, 28 `OK` lines and `STRESS OK` / `COMPLEX OK` / `EXPORT OK` on each of the three.
 - [`graalvm-round4-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round4-win-llvm):
   `graal/25.3.4.1-win-llvm` at `54969a2cee8` against `llvm-22.1.8-graal.3`, **all three platforms**
   (run [35365165424](https://github.com/Throwaway68/gha-graal/actions/runs/35365165424), 46m33s,
@@ -266,12 +290,13 @@ out of `stress`, and `tests/programs/excgc`, written to reproduce it single-thre
 platforms, so that crash is unreproduced and unexplained; and a throw across an MSVC-compiled frame
 is still untested - `complex`'s C code calls into the image and receives exceptions through JNI, but
 nothing throws *through* a frame the MSVC compiler emitted. The substratevm LLVM gate is no longer
-on this list: round 3 runs it (`graalvm-gate.yml`), and its `build,helloworld` tags pass on
-linux-amd64 ([35363511118](https://github.com/Throwaway68/gha-graal/actions/runs/35363511118)) and
-windows-amd64 ([35363499659](https://github.com/Throwaway68/gha-graal/actions/runs/35363499659)) at
-graal `54969a2cee8`; `hellomodule`'s `-H:+RuntimeClassLoading` variant remains blocked on every
-platform, because its interpreter stubs need multi-value returns and tail calls that the LLVM
-backend does not implement. The journal has the detail for each.
+on this list: round 3 runs it (`graalvm-gate.yml`), and at graal `fb017323af7` seven of the eight
+tags it set out to make green on windows-amd64 are green, with linux-amd64 as the reference - the
+table above has a run link for each. The eighth is `truffle_unittests`, which cannot build its image
+because the backend does not implement runtime compilation (GR-43073); `hellomodule`'s
+`-H:+RuntimeClassLoading` variant is blocked by a second missing feature, Graal's multi-value
+return, which task 1 established, so it was never one of the eight. Neither is a Windows problem -
+both fail on linux-amd64 in exactly the same way. The journal has the detail for each.
 
 JNI in both directions is covered by `tests/programs/complex` as of 2026-09-18 and is green on all
 three platforms - windows-amd64

@@ -653,6 +653,121 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   contain `--tool:llvm-backend` and the caller passed no `--blacklist`, so nothing changes for a
   build without the backend. `native_unittests` then runs 252 tests green on linux-amd64 and 225 on
   windows-amd64 (Windows also ignores `ProcessPropertiesTest`, GR-24075, from upstream).
+- 2026-09-18 (round 3, task 3): **Round 3 release `graalvm-round3-win-llvm` - the head the
+  substratevm gate was made green on**
+  (https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round3-win-llvm, run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35389184556), built by `graalvm.yml` from
+  `round3-release` (gha-graal `615b983`) against `graal/25.3.4.1-win-llvm` head
+  `fb017323af7a2165305de4341f64b3801230c0e2` ("LLVM backend: start and stop the tool heartbeat
+  explicitly, not as a try resource" - the same SHA all three jobs checked out, `GRAAL_SHA` in every
+  job log) and `llvm-22.1.8-graal.3`. Four assets, each uploaded on attempt 1/6 and verified by
+  published size and `state == uploaded` before the draft flag was cleared:
+  `graalvm-round3-win-llvm-linux-amd64.tar.gz` (1,166,389,300 B),
+  `graalvm-round3-win-llvm-windows-amd64.zip` (1,675,292,859 B),
+  `graalvm-round3-win-llvm-darwin-aarch64.tar.gz` (960,311,096 B), `manifest.json` (621 B).
+  Published 20:45:23Z. It is the newest release of this branch although round 4's carries the higher
+  number: the two rounds ran side by side, and round 3 is seven graal commits ahead of round 4's
+  `54969a2cee8`.
+
+  **What makes it round 3: the gate, not the release's own smoke test.** The smoke test is round
+  4's, unchanged - `scripts/graalvm/smoke-stress.sh` builds and runs `stress`, `complex` and
+  `export` on every platform - and all three platforms printed the same 28 `OK` lines and the same
+  sequence, eleven and `STRESS OK`, sixteen and `COMPLEX OK`, one and `EXPORT OK`, each followed by
+  `DEV-RUN OK`:
+
+  ```
+  LLVM backend: tested
+  SMOKE OK
+  ...
+  OK throw-catch-deep / implicit-exceptions / rethrow-wrap / finally-order
+  OK gc-live-frames / gc-weakref / gc-pressure
+  OK threads-basic / threads-gc / threads-wait-notify / thread-exceptions
+  STRESS OK
+  DEV-RUN OK
+  ...
+  OK jni-add / jni-string / jni-array / jni-upcall / jni-upcall-string / jni-upcall-throw
+  OK jni-native-throw / centrypoint-pointer / jni-threads / records-sealed-switch / regex
+  OK streams-format / bigint / file-io / reflection / collectors
+  COMPLEX OK
+  DEV-RUN OK
+  Export on <os>, image=true
+  OK centrypoint-export
+  EXPORT OK
+  DEV-RUN OK
+  ```
+
+  What this release adds over `graalvm-round4-win-llvm` is the seven graal commits round 3's task 2
+  made on top of `54969a2cee8`: the watchdog heartbeat that keeps the single PE/COFF `llvm-link`
+  alive (`ffcc40a2601` + `fb017323af7`), `Math.rint` through `nearbyint` because MSVC's UCRT has no
+  `roundeven` (`c0eda3552e6`), the `llvm-unittest-blacklist` and the harness changes around it
+  (`a9d95d4cb5e`, `3050c26b0a3`, `5f37c13b287`) and the `condconfig` svmbuild fix (`fa7e94b1f90`) -
+  the finding below has one line per commit. With them, seven of the eight tags round 3 set out to
+  make green on windows-amd64 are green (the Milestones entry above has the table); this release is
+  that GraalVM, built the ordinary way by `graalvm.yml`.
+
+  Green on the first dispatch, no re-dispatch, no upload retry. Timings, run 20:01:40Z to 20:45:33Z,
+  43m53s wall:
+
+  - **linux-amd64** job 34m06s: build 25m32s, smoke 5m21s, package 2m07s, upload 13s. Image builds
+    inside the smoke step: `hello-llvm` 59.8s, `stress` 58.5s, `complex` 1m40s, `export` 1m27s.
+  - **windows-amd64** job 35m14s: build 25m29s, smoke 6m37s, package 1m35s, upload 14s. Images:
+    1m12s, 1m05s, 2m13s, 1m50s.
+  - **darwin-aarch64** job 39m09s: build 32m55s, smoke 4m05s, package 1m22s, upload 13s. Images:
+    55.5s, 46.5s, 1m13s, 58.1s.
+  - **release job** 4m07s: 1m38s downloading the three archives, 2m14s uploading the four assets,
+    2s clearing the draft flag.
+
+  Round 4's jobs, for comparison, were linux 32m32s, windows 43m50s, darwin 38m11s. The windows job
+  is 8m36s shorter here, 6m25s of that in the build step (25m29s against 31m54s), which is
+  runner-to-runner variation rather than anything the seven commits do - this journal has measured
+  a windows-2022 build of this GraalVM varying by minutes for identical input. What the numbers do
+  show is that the two Windows backend fixes cost the release nothing: its four Windows images took
+  1m12s / 1m05s / 2m13s / 1m50s against round 4's 1m28s / 1m21s / 2m46s / 2m18s at `54969a2cee8`.
+
+  **Still open after round 3**, in the order they are likely to be tackled:
+
+  - *Two gate tags are out of reach on every platform, each for a feature the backend does not
+    have.* `truffle_unittests` needs runtime compilation, and upstream refuses it itself -
+    `RuntimeCompilationFeature` aborts with "Runtime compilation is currently unimplemented on the
+    LLVM backend (GR-43073)". `hellomodule`'s fourth variant
+    (`-H:+RuntimeClassLoading -H:+AllowJRTFileSystem`) compiles the Ristretto interpreter's
+    bytecode-handler stubs, which use Graal's multi-value return: `LLVMGenerator.getResult` under
+    `LIRGeneratorTool.emitMultiReturns` is unimplemented. Neither is a Windows gap - both fail the
+    same way on linux-amd64 - and the second is not a small fix: it means handing extra results back
+    in the caller's argument registers, a calling convention this backend does not have.
+  - *`all_native_unittests` costs about an hour per batch on windows-amd64* (55m43s and 55m00s at
+    the head), so Oracle's whole `basics` tag list in one Windows job would be roughly 3.5 hours,
+    past the 240-minute job limit once `build` and `helloworld` are added. The two `--partial`
+    batches therefore stay separate dispatches; splitting further is not possible with
+    `NATIVE_UNITTEST_CUSTOM_BATCHES = ('1/2', '2/2')`.
+  - *The single PE/COFF bitcode batch is this port's biggest performance cliff.* 32m06s of the
+    `java.desktop` junit image's 37m20s is `[7/8] Laying out methods`, i.e. one `llvm-link` plus one
+    `llc` over the whole image, single-threaded, because there is no relocatable link on PE/COFF and
+    `createBitcodeBatches` therefore uses one batch. `ffcc40a2601`'s heartbeat stops the watchdog
+    killing it, but the wall time is real and grows with image size - a Windows image appreciably
+    larger than this one may not fit a CI job at all. Whether a two-stage link (many batches, then
+    one `llvm-link` of their outputs) keeps the "one object" property is worth measuring.
+  - *The three backend bugs of rounds 2 and 3 are all still open.* A caught `StackOverflowError`
+    (`tests/programs/overflow`) fails on windows-amd64 (recursive unwind ending in
+    `EXCEPTION_STACK_OVERFLOW`) and on linux-amd64 (bare SIGSEGV, run 35336472456), and has never
+    been tried on darwin-aarch64. The threads+catch crash of run 35325689605 - stale references
+    after a caught exception in an allocating eight-thread loop - is still unreproduced;
+    `tests/programs/excgc` passes on every platform and `complex`'s `jni-threads` did not provoke it
+    either. And a throw *through* an MSVC-compiled frame is still untested: `complex` crosses the
+    JNI boundary in both directions, but in each case the C frame is entered and left normally.
+  - *Two pieces of source hygiene are left over from round 2, in the backend.* The
+    `llvm.frameaddress(0)` comment in `LLVMGenerator.emitReadCallerStackPointer` still splits the
+    case - "this frame's stack pointer after the prologue for frames up to 128 bytes and rbp - 128,
+    still inside this frame, for anything larger" - which round 2's review called imprecise, because
+    the prologue sets `rbp = rsp + SEHFrameOffset` and `rbp - SEHFrameOffset` is therefore the
+    post-prologue RSP for every static frame size. That review promised the reword for round 3's
+    first graal commit; round 3 did not do it, and the comment is unchanged at `fb017323af7`. And the Windows statepoint shift is still fixed on the reader side -
+    `LLVMObjectFileReader` moving a `Call` infopoint one byte earlier when a `0x90` sits in front of
+    the recorded offset; the proper fix is in LLVM itself (emit the stack map label before
+    `maybeEmitNopAfterCallForWindowsEH` in `X86AsmPrinter::LowerSTATEPOINT`) and costs an LLVM
+    release rebuild, which is why it was not taken.
+  - *The gate has never run on darwin-aarch64.* `graalvm-gate.yml` offers the platform, and the
+    backend works there (round 4's release smoke test), but no gate tag has been dispatched for it.
 
 
 ## Findings
@@ -2169,6 +2284,83 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   round-to-nearest-ties-to-even under the default rounding mode and, unlike `rint`, does not raise
   inexact - i.e. it *is* `roundeven` for a VM that never changes the rounding mode, and Substrate VM
   never does, there being no Java API for it. ELF and Mach-O keep the intrinsic.
+
+- 2026-09-18 (round 3, task 3, release run
+  https://github.com/Throwaway68/gha-graal/actions/runs/35389184556): **what round 3 changed on
+  `graal/25.3.4.1-win-llvm`** - ten commits on top of the darwin round's head `6dfc22e0897`, the
+  first three from task 1 (`build,helloworld`), the other seven from task 2 (the remaining gate
+  tags). Five are in the backend and the object-file writer, four in the gate's own test harness,
+  one in upstream interpreter code. Three carry a Windows/PE-COFF branch (`5f21e16095b`,
+  `54969a2cee8`, `c0eda3552e6`) and two more change platform-neutral code that only Windows needed
+  (`ffcc40a2601`, `fb017323af7`); the remaining five behave the same everywhere, and every one of
+  them was measured on linux-amd64 too before it was called a fix:
+
+  - `979f76f9073` - `InterpreterSupportImpl.isInterpreterBytecodeRoot` is `@Uninterruptible` and
+    called `String.equals`, which is not, so `UninterruptibleAnnotationChecker` refused every image
+    carrying the Ristretto interpreter - `hellomodule`'s fourth variant - on both platforms and with
+    or without the backend. It now uses `UninterruptibleUtils.String.equals` with an explicit null
+    guard, because that variant does not tolerate a null argument and
+    `FrameInfoQueryResult.getSourceMethodName()` can be null. Upstream graal-25.3.4.1 code.
+  - `5f21e16095b` - **PE/COFF only.** `LLVMNativeImageCodeCache.patchMethods` defined one symbol per
+    constant and per `CGlobalData` item and asked for them to be *exported*; on PE/COFF that is a
+    `/EXPORT:` directive each, and `link.exe` stops at `LNK1189: library limit of 65535 objects
+    exceeded` - the gate's `javac` image has 79,723 of them. Nothing looks those symbols up in the
+    export table, so on PE/COFF they are now global but not exported; ELF and Mach-O keep upstream's
+    value.
+  - `54969a2cee8` - **PE/COFF only.** The mirror image of the previous one: with the backend the code
+    lives in a separate object, so `defineMethodSymbol` only *declares* each method in the image
+    object and dropped `exported` doing so, and a `helloworld --shared` DLL therefore exported
+    nothing (`AttributeError: function 'run_main' not found`). `ObjectFile.createUndefinedSymbol`
+    gains an `exported` variant - a no-op off PE/COFF - and `PECoffSymtabStruct` no longer requires
+    an exported symbol to be defined in this object. This is also the commit that made
+    `tests/programs/export` green on Windows, and the one release `graalvm-round4-win-llvm` was
+    built from.
+  - `a9d95d4cb5e` - `ForeignTests$TestFeature` is registered in every `svmjunit` image, and with the
+    backend its `duringSetup()` aborts the build (`ImageSingletons do not contain key
+    RuntimeForeignAccessSupport`), because `SubstrateOptions.isForeignAPIEnabled()` is
+    `!useLLVMBackend()` by design. The feature is no longer registered under the backend and the two
+    `com.oracle.svm.test.foreign.*` classes move into the new
+    `substratevm/mx.substratevm/llvm-unittest-blacklist`, which `_native_unittest` passes to
+    `--blacklist` only when the build arguments select the backend and the caller passed no
+    blacklist of its own. Both platforms.
+  - `fa7e94b1f90` - `mx gate --tags build,condconfig` aborted in two seconds with "Writing image to
+    non-existent directory ... svmbuild is not allowed": `build_native_image_agent` writes the agent
+    into `svmbuild_dir()` and nothing creates it - in Oracle's `basics` job `helloworld` happens to
+    create it first. The tag now creates the directory itself. Nothing to do with the backend or with
+    Windows; the failing command never sees the extra image builder arguments.
+  - `3050c26b0a3` - four JFR tests need *real* virtual threads, and `ContinuationsFeature` switches
+    continuations off when `useLLVMBackend()`, so `Thread.ofVirtual()` returns a bound virtual thread
+    and `jdk.internal.vm.Continuation` fails to initialize. The four classes are blacklisted with
+    that reason. Both platforms; every other virtual-thread test in the suite passes.
+  - `5f37c13b287` - the four `-H:+RuntimeClassLoading` unittest groups compile the interpreter's
+    bytecode-handler stubs, which return several values: 400 compilations fail with
+    `unimplemented: the LLVM backend doesn't produce an LIRGenerationResult` from
+    `LLVMGenerator.getResult` under `LIRGeneratorTool.emitMultiReturns`. The same gap that blocks
+    `hellomodule`, on both platforms; the four classes are blacklisted, because implementing it means
+    a calling convention the backend does not have.
+  - `ffcc40a2601` - **Windows only in effect.** The image generator's deadlock watchdog killed the
+    `java.desktop` image inside `LLVMToolchainUtils.llvmLink`: an external tool cannot call
+    `DeadlockWatchdog.recordActivity`, and on PE/COFF `createBitcodeBatches` uses a *single* batch
+    (there is no relocatable link there), so one `llvm-link` and one `llc` run for the whole image -
+    over ten minutes for a large one. A heartbeat thread now records activity once a minute for as
+    long as the tool's process is alive, so a genuine deadlock with no tool running is still caught.
+    linux-amd64 never hits it because it links many smaller batches.
+  - `c0eda3552e6` - **Windows only.** `Math.rint` emits `llvm.roundeven`, which llc lowers to a call
+    to the C23 function `roundeven` for the generic x86-64 CPU the backend compiles for; MSVC's UCRT
+    does not export it (`LNK2019: unresolved external symbol roundeven`). On Windows the call now
+    goes to `nearbyint`/`nearbyintf` by name through `buildLibMUnaryOp`, with the `nobuiltin`
+    attribute that keeps it from being canonicalized back; ELF and Mach-O keep the intrinsic. The
+    `java.desktop` junit image is the first image of this port big enough to reach `Math.rint`.
+  - `fb017323af7` - no behaviour change: the heartbeat of `ffcc40a2601` was a try-with-resources
+    whose variable is never referenced, which `mx build --warning-as-error` refuses
+    (`[try] auto-closeable resource heartbeat is never referenced`); it is now started after the
+    process and stopped in the `finally` that already destroys it. The head this release is built
+    from.
+
+  Taken together: round 3 needed **two** Windows-specific backend fixes (`ffcc40a2601` +
+  `fb017323af7`, and `c0eda3552e6`) and two PE/COFF object-file fixes (`5f21e16095b`,
+  `54969a2cee8`); everything else it found was a property of the LLVM backend on every platform or
+  of the gate harness itself. No fix of this round was needed on linux-amd64 alone.
 
 
 ## Decisions
