@@ -105,6 +105,15 @@ jobs:
         uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.11'
+      - name: Python dependencies
+        shell: bash
+        # The `helloworld` tag ends in the gate task `Validate JSON build info`, which checks
+        # native-image's `build-output.json` against the schema in `graal/docs` and aborts with
+        # "Python module \"jsonschema\" is required to validate reachability metadata but was not
+        # found" without it (run 35348125338). `$MX_PYTHON` rather than `python3`: mx runs `python`
+        # on windows-2022, and the module has to be in the interpreter mx itself uses.
+        run: |
+          "${MX_PYTHON:-python3}" -m pip install --disable-pip-version-check jsonschema
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build zlib1g-dev
