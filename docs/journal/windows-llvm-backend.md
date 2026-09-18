@@ -519,9 +519,10 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
     1m28s, 1m21s, 2m46s, 2m18s.
   - **release job** 2m28s, uploads 1m39s of it.
 
-  The two extra programs cost about 2 minutes per platform on linux/darwin and 5 on Windows - the
-  same trade round 2 made for `stress`, and now a release cannot be published whose backend fails
-  to cross the JNI boundary or to export an entry point.
+  The two extra programs cost about 3 minutes of image building per platform on linux-amd64 and
+  darwin-aarch64 and 5 on windows-amd64 (`complex` + `export`: 1m35s + 1m22s, 1m24s + 1m9s,
+  2m46s + 2m18s) - the same trade round 2 made for `stress`, and now a release cannot be published
+  whose backend fails to cross the JNI boundary or to export an entry point.
 
   **Still open after round 4**, in the order they are likely to be tackled:
 
