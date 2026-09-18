@@ -33,7 +33,7 @@ on:
         default: ''
         type: string
       debug_ssh:
-        description: 'Open an interactive ssh session on the runner after dev-run (tmate on linux/macOS, OpenSSH + cloudflared on windows); the address is in artifact ssh-<platform>'
+        description: 'Open an interactive ssh session on the runner after dev-run (tmate on linux/macOS, OpenSSH + cloudflared on windows); the address is in artifact ssh-<platform> (windows) / tmate-<platform> (linux/macOS)'
         default: false
         type: boolean
 

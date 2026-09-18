@@ -986,12 +986,14 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
 
 ## Dead ends
 
-- 2026-09-18 (task 1): a throwaway `win-ssh-spike.yml` could not be dispatched at all -
+- 2026-09-18 (task 1, spike run https://github.com/Throwaway68/gha-graal/actions/runs/35325048211):
+  a throwaway `win-ssh-spike.yml` could not be dispatched at all -
   `gh workflow run` and the REST dispatch both answer `HTTP 404: workflow win-ssh-spike.yml not
   found on the default branch`, because `workflow_dispatch` only exists for workflows that are on
   the default branch. The spike ran on `on: push` to `round2-ssh` with a `paths:` filter instead,
   which is what a throwaway wants anyway: one push of the script = one iteration.
-- 2026-09-18 (task 1): the first `ssh -o ProxyCommand='cloudflared access tcp --hostname %h'` from
+- 2026-09-18 (task 1, spike run https://github.com/Throwaway68/gha-graal/actions/runs/35325048211):
+  the first `ssh -o ProxyCommand='cloudflared access tcp --hostname %h'` from
   the Mac died with `dial tcp: lookup <name>.trycloudflare.com: no such host` - not the tunnel's
   fault: the local resolver NXDOMAINs subdomains of `trycloudflare.com` (`dig @8.8.8.8` answers,
   the router does not), as several ISP resolvers now do. Worked around by running the client end in

@@ -34,11 +34,12 @@ if ($cap.State -ne 'Installed') {
     Stop-Job $job
     throw "Add-WindowsCapability $($cap.Name) did not finish within 180 s; fall back to MSYS2 openssh"
   }
+  if ($job.State -ne 'Completed') { Receive-Job $job; throw "Add-WindowsCapability failed ($($job.State))" }
   Receive-Job $job | Out-Null
   Log "installed $($cap.Name)"
 }
 
-$keys = @((Invoke-WebRequest -UseBasicParsing "https://github.com/$Actor.keys").Content -split "`r?`n" |
+$keys = @((Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 "https://github.com/$Actor.keys").Content -split "`r?`n" |
           Where-Object { $_.Trim() })
 if (-not $keys) { throw "no public keys on github.com/$Actor; the session would be unusable" }
 Log "$($keys.Count) public key(s) from github.com/$Actor"
@@ -54,9 +55,15 @@ Stop-Service sshd
 $ak = 'C:\ProgramData\ssh\administrators_authorized_keys'
 Write-LfFile $ak $keys
 icacls $ak /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+# Public keys and nothing else: `PasswordAuthentication no` alone leaves keyboard-interactive
+# (default yes) as a second, password-backed way in for an account that is an administrator.
+# `AuthenticationMethods` is prepended rather than appended, because the file ends in the
+# `Match Group administrators` block and a keyword after a Match line belongs to that block.
 $cfg = 'C:\ProgramData\ssh\sshd_config'
-(Get-Content $cfg) -replace '^#?PasswordAuthentication .*', 'PasswordAuthentication no' `
-                   -replace '^#?PubkeyAuthentication .*', 'PubkeyAuthentication yes' | Set-Content $cfg
+$body = (Get-Content $cfg) -replace '^#?PasswordAuthentication .*', 'PasswordAuthentication no' `
+                           -replace '^#?(KbdInteractiveAuthentication|ChallengeResponseAuthentication) .*', 'KbdInteractiveAuthentication no' `
+                           -replace '^#?PubkeyAuthentication .*', 'PubkeyAuthentication yes'
+Write-LfFile $cfg (@('AuthenticationMethods publickey') + $body)
 
 # Git bash as the login shell. DefaultShellCommandOption matters as much as DefaultShell: without
 # it sshd passes cmd.exe's `/c` to the shell, so `ssh <host> '<command>'` runs nothing.
@@ -102,10 +109,15 @@ Log "sshd $((Get-Service sshd).Status), DefaultShell=$bash, BASH_ENV=$envFile"
 
 # 3. cloudflared quick tunnel to port 22. The hostname shows up in its log within seconds; the
 #    caller reaches it with `ssh -o ProxyCommand='cloudflared access tcp --hostname %h'`.
+# Pinned, not `releases/latest`: the session mechanism should not change under the job because
+# cloudflare shipped a release that morning. Bump it when there is a reason to.
+$cfVersion = '2026.9.1'
 $cf = Join-Path $OutDir 'cloudflared.exe'
-Invoke-WebRequest -UseBasicParsing 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile $cf
+Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 `
+  "https://github.com/cloudflare/cloudflared/releases/download/$cfVersion/cloudflared-windows-amd64.exe" -OutFile $cf
 $log = Join-Path $OutDir 'cloudflared.log'
-Start-Process -FilePath $cf -ArgumentList 'tunnel','--no-autoupdate','--url','tcp://localhost:22','--logfile',$log -WindowStyle Hidden
+$cfProc = Start-Process -FilePath $cf -PassThru -WindowStyle Hidden `
+  -ArgumentList 'tunnel','--no-autoupdate','--url','tcp://localhost:22','--logfile',$log
 $host_ = $null
 foreach ($i in 1..60) {
   Start-Sleep 2
@@ -114,7 +126,11 @@ foreach ($i in 1..60) {
     if ($m) { $host_ = $m.Matches[0].Groups[1].Value; break }
   }
 }
-if (-not $host_) { if (Test-Path $log) { Get-Content $log }; throw 'cloudflared did not publish a trycloudflare hostname' }
+if (-not $host_) {
+  if (Test-Path $log) { Get-Content $log }
+  Stop-Process -Id $cfProc.Id -Force -ErrorAction SilentlyContinue
+  throw 'cloudflared did not publish a trycloudflare hostname'
+}
 
 # 4. Publish. The private key stays with the caller; nothing in address.txt is secret.
 Set-Content -Path $HoldFile -Value 'delete me to end the session'
