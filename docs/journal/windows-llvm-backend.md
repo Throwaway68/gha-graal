@@ -531,9 +531,9 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
 
   | tag | windows-amd64 | linux-amd64 | result |
   |-----|---------------|-------------|--------|
-  | `build,native_unittests` | [35380311997](https://github.com/Throwaway68/gha-graal/actions/runs/35380311997) 32m40s | [35380363276](https://github.com/Throwaway68/gha-graal/actions/runs/35380363276) 21m54s | **green**, 4 tests blacklisted |
-  | `build,all_native_unittests --partial 1/2` | [35380348948](https://github.com/Throwaway68/gha-graal/actions/runs/35380348948) 55m43s | [35380400267](https://github.com/Throwaway68/gha-graal/actions/runs/35380400267) 55m30s | **green**, 4 tests blacklisted |
-  | `build,all_native_unittests --partial 2/2` | [35380356446](https://github.com/Throwaway68/gha-graal/actions/runs/35380356446) 55m00s | [35380407856](https://github.com/Throwaway68/gha-graal/actions/runs/35380407856) 51m45s | **green** |
+  | `build,native_unittests` | [35380311997](https://github.com/Throwaway68/gha-graal/actions/runs/35380311997) 32m40s | [35380363276](https://github.com/Throwaway68/gha-graal/actions/runs/35380363276) 21m54s | **green**, 6 classes blacklisted; 225 tests run on windows, 252 on linux |
+  | `build,all_native_unittests --partial 1/2` | [35380348948](https://github.com/Throwaway68/gha-graal/actions/runs/35380348948) 55m43s | [35380400267](https://github.com/Throwaway68/gha-graal/actions/runs/35380400267) 55m30s | **green**, those 6 plus the 4 `RuntimeClassLoading` classes |
+  | `build,all_native_unittests --partial 2/2` | [35380356446](https://github.com/Throwaway68/gha-graal/actions/runs/35380356446) 55m00s | [35380407856](https://github.com/Throwaway68/gha-graal/actions/runs/35380407856) 51m45s | **green**, the same 10 |
   | `build,check_svm_invariants` | [35380319303](https://github.com/Throwaway68/gha-graal/actions/runs/35380319303) 4m29s | [35380370096](https://github.com/Throwaway68/gha-graal/actions/runs/35380370096) 4m14s | **green**, first try |
   | `build,condconfig` | [35380326588](https://github.com/Throwaway68/gha-graal/actions/runs/35380326588) 10m08s | [35380377849](https://github.com/Throwaway68/gha-graal/actions/runs/35380377849) 7m48s | **green** after `fa7e94b1f90` |
   | `build,java_agent` | [35380333677](https://github.com/Throwaway68/gha-graal/actions/runs/35380333677) 15m24s | [35380385079](https://github.com/Throwaway68/gha-graal/actions/runs/35380385079) 13m38s | **green**, first try |
@@ -546,7 +546,8 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `truffle_unittests`, cannot build its image on any platform because the LLVM backend does not
   implement runtime compilation, and upstream aborts with that message itself.
 
-  **Six root causes, five fixed and two classes of test blacklisted** (every one measured on both
+  **Six root causes: four fixed in code, two answered with a blacklist, and one of the four fixed
+  ones also needed a blacklist entry** (every one measured on both
   platforms before it was called a Windows problem - and only two of them were):
 
   | # | what | where | fix |
