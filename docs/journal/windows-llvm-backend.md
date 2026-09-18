@@ -195,6 +195,42 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   https://github.com/Throwaway68/gha-graal/actions/runs/35325048211 (the throwaway spike workflow is
   deleted again); what it takes is in Findings below.
 
+- 2026-09-18: **`stress` is green on windows-amd64** (round 2, task 3): exceptions, GC and threads
+  all work on the Windows LLVM backend, not just `hello`. Clean run from `main` and the branch head
+  `61c1437467e`, https://github.com/Throwaway68/gha-graal/actions/runs/35334705301 (build 8m23s,
+  `dev-run` 1m39s of which native-image 1m29s):
+
+  ```
+  Stress on Windows Server 2022, 4 cpus
+  deep frames in trace: 61
+  OK throw-catch-deep
+  OK implicit-exceptions
+  OK rethrow-wrap
+  OK finally-order
+  OK gc-live-frames
+  OK gc-weakref
+  OK gc-pressure
+  OK threads-basic
+  OK threads-gc
+  OK threads-wait-notify
+  OK thread-exceptions
+  STRESS OK
+  DEV-RUN OK
+  ```
+
+  linux-amd64 is `DEV-RUN OK` on the same commit with the same twelve lines
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35334724060, job 7m59s), so the two fixes
+  below cost the platform that was already green nothing - both are behind
+  `LLVMWindowsSupport.isWindows()`.
+
+  It took two root causes, both of them wrong assumptions about what an LLVM intrinsic or a stack
+  map record means on Win64 rather than anything about exceptions:
+  `emitReadCallerStackPointer` handed the stack walker an address inside its own frame
+  (graal `acd5863e29d`), and a statepoint record can name the padding byte behind its call, so the
+  first collection of every image failed (graal `61c1437467e`). Both are Findings below. The first
+  Windows run of `stress` is https://github.com/Throwaway68/gha-graal/actions/runs/35329170964; one
+  ssh session of 75 minutes (artifact at 09:34Z, hold released at 10:49Z) was enough for both.
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -978,12 +1014,155 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   throwing, so 313 collections are taken *while the throwing call is on the stack* and three
   references live across that invoke (`counter`, `box`, `junk`) are summed after the catch. It is
   green on HotSpot in 0.7 s and **has not yet been run on the backend**, so it is not confirmed to
-  reproduce the crash.
+  reproduce the crash. **It does not** - see the task-3 finding below (2026-09-18): `excgc` is green
+  on both linux-amd64 and windows-amd64, so this hypothesis is still unconfirmed and this
+  reproducer is not the one that will settle it.
 
   For both this and the `StackOverflowError` crash: **whether stock upstream graal's Linux LLVM
   backend behaves the same is unknown** - no run against an unmodified ref was made - so it is not
   established whether this branch introduced either. Both are Linux-side backend questions, not
   Windows ones, and both are open for a later task.
+
+- 2026-09-18 (task 3, run https://github.com/Throwaway68/gha-graal/actions/runs/35329170964, graal
+  `acd5863e29d`): **`llvm.frameaddress(0)` is this frame's own stack pointer on Win64, not the
+  frame-pointer chain node, so every stack walk started 48 bytes inside the wrong frame.**
+  `LLVMGenerator.emitReadCallerStackPointer` builds the caller's stack pointer as
+  `llvm.frameaddress(0) + LLVMTargetSpecific.getCallerSPOffset()`, and those two words are right
+  only where the intrinsic returns the saved frame pointer: return address one word above it,
+  caller's stack pointer one above that. On Windows `X86TargetLowering::LowerFRAMEADDR` takes the
+  `usesWindowsCFI()` branch and returns a fixed frame object, which comes out as the establisher
+  frame of the SEH unwind info - the frame's own stack pointer. `JavaThreads.visitCurrentStackFrames`
+  compiled to
+
+  ```
+  b3630: 55                 pushq %rbp
+  b3631: 48 83 ec 30        subq  $0x30, %rsp
+  b3635: 48 8d 6c 24 30     leaq  0x30(%rsp), %rbp
+  ...
+  b364e: 48 8d 4d e0        leaq  -0x20(%rbp), %rcx     <- startSP for walkCurrentThread
+  ```
+
+  `%rbp - 0x20` is `%rsp + 0x10`: the walk begins 16 bytes above the frame it should begin 64 bytes
+  above, and reads a local variable of that frame as a return address. It is not a reliable crash,
+  which is why the first Windows `stress` got four lines out first (`throw-catch-deep` even printed
+  `deep frames in trace: 61`): the walk only dies when that slot happens not to look like code. When
+  it did:
+
+  ```
+  Stack walk must walk only frames of known code:  sp=0x0000002e36eff560  ip=0x000001429da830e8
+  Fatal error: Stack walk must walk only frames of known code
+  ```
+
+  with the ip in the eden chunk (heap base `0x1429d680000`) and `sp` exactly
+  `visitCurrentStackFrames`'s own SP + 16. Fixed by taking the return address slot from
+  `llvm.addressofreturnaddress()` and adding one word on Windows; the other platforms keep the frame
+  address, which is what they are tested with. Reduced to a twelve-line program that only calls
+  `new RuntimeException("x").getStackTrace()` in `main`.
+
+- 2026-09-18 (task 3, same run, graal `61c1437467e`): **a Windows statepoint stack map record can
+  name the padding byte behind its call, and the GC then finds no reference map** - every image died
+  in its first collection. `X86AsmPrinter::LowerSTATEPOINT` emits the stack map label at the end of
+  the statepoint sequence, and between the call and the label it calls
+  `maybeEmitNopAfterCallForWindowsEH`, which emits a `nop` when the next machine instruction is
+  `SEH_BeginEpilogue`, "because the Windows unwinder will not invoke a function's exception handler
+  if the instruction pointer is in the function prologue or epilogue". The recorded offset is then
+  the first instruction of the epilogue, one past the address the call returns to.
+
+  `JavaMainWrapper.run` is one call long and on the stack of every thread:
+
+  ```
+  15a20: 55                 pushq %rbp
+  15a21: 48 83 ec 20        subq  $0x20, %rsp
+  15a25: 48 8d 6c 24 20     leaq  0x20(%rsp), %rbp
+  15a2a: e8 00 00 00 00     callq JavaMainWrapper_doRun_F09BQfnF3iKa8bUp7D6GY0
+  15a2f: 90                 nop                   <- the call returns here, +0xf
+  15a30: 48 83 c4 20        addq  $0x20, %rsp
+  ```
+
+  and `-H:DumpLLVMStackMap` says `JavaMainWrapper_run_iTUBl8UzFfAz1VYmMX6I32 -> f110 (48)` with one
+  call site `[16] -> com.oracle.svm.core.JavaMainWrapper.doRun (30062) []`: 16, not 15. At run time:
+
+  ```
+  ip: 0x00007ff6ffda137f, sp: 0x0000004c413efb80, code info: ... Fatal error: No reference map information found
+  ```
+
+  from `GCImpl.walkStack` -> `CodeInfoTable.fatalErrorNoReferenceMap`, `0x...a137f` being that
+  function + 0xf. Calls that are not followed by the epilogue are recorded at the return address
+  exactly (`Gc1.main`'s first `slowNewArray` call returns to +0x2c and the record says `[44]`), so
+  only calls in front of an epilogue shift - and in a method with more than one call the shift is
+  silent and worse than a crash, because the GC then reads the reference map of the call before it.
+  `LLVMObjectFileReader.readStackMap` now reads the machine code of the batch object back and moves
+  the `Call` infopoint one byte earlier when a `0x90` sits in front of the recorded offset, which is
+  sound in the object `llc` writes: a call there ends either in the still unrelocated - so zero -
+  displacement bytes of a `rel32` call or in the ModRM byte of an indirect call. The stack map
+  record itself is still looked up by its own offset; only the address the infopoint is registered
+  under changes. The cleaner fix is in LLVM (move the label emission in front of
+  `maybeEmitNopAfterCallForWindowsEH`), which would cost a release rebuild; the reader-side fix
+  needs none and is contained in the two Windows branches.
+
+- 2026-09-18 (task 3, runs 35329170964 and 35334705301): **the Windows native-image build's "2
+  warnings" are not about the image being built at all - they are two warnings that the
+  `native-image` launcher's own image build emitted, baked into that launcher's image heap.**
+  Round 1 left them unread. What they are:
+
+  ```
+  the option 'DumpRuntimeCompilationOnSignal' is not supported on Windows and will be ignored.
+  the option '--enable-monitoring' contains value(s) that are not supported on Windows: jvmstat. Those values will be ignored.
+  ```
+
+  Both come from `VMInspectionOptions.notSupportedOnWindows` via `HostedOptionKey.validate` in the
+  builder process that compiles `lib/svm/bin/native-image.exe`, whose macro passes both options.
+  `LogUtils.warning` increments a static `warningsCount`, `LogUtils` is initialised at image build
+  time, and so the launcher's image heap carries `warningsCount == 2`. Every invocation of that
+  launcher therefore passes `-H:DriverWarningsCount=2` to its builder (confirmed with `--verbose`),
+  and `ProgressReporter.printWarningsCount` prints the count of a warning it has no text for. That
+  is why nothing is ever printed next to it, and why `native-image -cp classes Gc1` with no options
+  and no LLVM backend reports the same two. linux-amd64 reports none, because both messages are
+  Windows-only. **They do not matter**: they concern the launcher, not the images this repo builds.
+  Established by adding a temporary probe to `LogUtils.warning` on the runner, rebuilding, and
+  reverting it - nothing of it is committed.
+
+- 2026-09-18 (task 3, stretch, no fix attempted): **`tests/programs/overflow` fails on
+  windows-amd64 too, but differently from Linux: the stack-boundary check does fire, and the unwind
+  of the `StackOverflowError` then recurses until the real stack runs out.** Windows prints
+  `ExceptionCode: -1073741571 (EXCEPTION_STACK_OVERFLOW)` through the `SegfaultHandler`, where
+  linux-amd64 dies with a bare SIGSEGV and an empty stderr
+  (https://github.com/Throwaway68/gha-graal/actions/runs/35336472456, exit 139, still true at the
+  branch head). The Windows dump shows the loop verbatim:
+
+  ```
+  A ExceptionUnwind.unwindException(ExceptionUnwind.java)
+  A ExceptionUnwind.unwindExceptionWithoutCalleeSavedRegisters(ExceptionUnwind.java:104)
+  A StackOverflowCheckImpl.throwCachedStackOverflowError(StackOverflowCheckImpl.java:318)
+  A RealLog.string(RealLog.java:66)
+  A ExceptionUnwind.reportRecursiveUnwind(ExceptionUnwind.java:154)
+  A ExceptionUnwind.unwindException(ExceptionUnwind.java:122)
+  ... the same five frames again, all the way down
+  ```
+
+  with `%rcx` holding the pre-allocated `java.lang.StackOverflowError`. So the yellow zone is
+  entered and `throwCachedStackOverflowError` runs, the unwind of that error does not reach the
+  `catch (StackOverflowError)` in `Overflow`, `unwindException` sees a second unwind in flight and
+  calls `reportRecursiveUnwind`, whose own `RealLog.string` trips the stack boundary again and
+  starts the next round. *Hypothesis*, not proven here: the first unwind never finds its handler
+  because `LLVMExceptionUnwind.personality` only re-protects the yellow zone once a handler frame
+  has been found, and `_Unwind_RaiseException` on Windows is `RaiseException`, i.e. the OS's SEH
+  dispatch, which needs stack of its own in a thread that has almost none left. Left open: this is
+  a backend bug on both platforms and out of this task's scope.
+
+- 2026-09-18 (task 3, stretch): **`tests/programs/excgc` passes - on windows-amd64 and on
+  linux-amd64 - so it does not reproduce the crash it was written for.** On the Windows runner it
+  printed `OK exception-gc` / `EXCGC OK` / `DEV-RUN OK`, and so did linux-amd64 in
+  https://github.com/Throwaway68/gha-graal/actions/runs/35336454135 (the first run either program
+  has ever had on the backend). The task-2 hypothesis - "references live across an invoke are not
+  reported to the GC on the unwind edge", from the register dump of the `threads-basic` crash in run
+  35325689605 - is therefore **not** confirmed by this reproducer: 313 forced collections taken
+  while a throwing call is on the stack, with three references live across it, survive. Either the
+  crash needs the threads (a collection taken by *another* thread while this one is between the
+  throw and the landing pad, which is what that dump showed) or the reading of the dump was wrong.
+  `stress` keeps `threads-basic` without the caught exception and is green on both platforms, so the
+  open question is what `excgc` would have to add to reproduce; a threaded version is the obvious
+  next try.
 
 
 ## Decisions
@@ -1092,3 +1271,20 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   the router does not), as several ISP resolvers now do. Worked around by running the client end in
   a container with its own resolver (`docker run -i --rm --dns 8.8.8.8 cloudflare/cloudflared access
   tcp --hostname %h` as the ProxyCommand); noted in the README.
+- 2026-09-18 (task 3, run https://github.com/Throwaway68/gha-graal/actions/runs/35329170964):
+  **"the first Windows `stress` failure is about exception unwinding" - it is not.** `stress` died
+  in `rethrow-wrap`, in `Stress$Wrapped.<init>` inside a `catch` block, which reads like the landing
+  pad leaving a frame libunwind's SEH mode restored badly, and the first reduced program was built
+  around exactly that: throw, catch, allocate a `Throwable` in the handler. It caught something -
+  but the case that failed was `Thread.currentThread().getStackTrace()` in the handler, while
+  building a `Throwable` there passed, which no unwinding story explains. The second reduced program
+  put a plain `new RuntimeException("x").getStackTrace()` in `main` with no exception ever thrown,
+  and that failed on the first line. Every stack walk was broken (Finding above); exception handling
+  on Windows had been working since the first run, including the 61-frame stack trace
+  `throw-catch-deep` prints.
+- 2026-09-18 (task 3): **"the frame with no reference map is an entry point, so the C calling
+  convention round 1 gave entry points on Windows is to blame"** - that convention change was
+  already reverted in graal `c397f423961` (the Win64 home space is fixed in LLVM instead), and
+  `addMainFunction` puts every function on the Graal calling convention. The frame was
+  `JavaMainWrapper.run` only because it is one call long and that call sits in front of the
+  epilogue.
