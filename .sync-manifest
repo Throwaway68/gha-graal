@@ -48,3 +48,7 @@ tests/programs/complex/expected.txt
 tests/programs/complex/javac.flags
 tests/programs/complex/META-INF/native-image/gha-graal/complex/jni-config.json
 tests/programs/complex/META-INF/native-image/gha-graal/complex/native-image.properties
+tests/programs/export/Export.java
+tests/programs/export/export.c
+tests/programs/export/expected.txt
+tests/programs/export/javac.flags
