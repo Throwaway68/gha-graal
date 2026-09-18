@@ -13,8 +13,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * to relocate any of them is caught by the checked sums. Its own program so that `stress` can stay
  * the green baseline.
  *
- * Not yet confirmed to reproduce the crash on the backend - no LLVM-backend run has been spent on
- * it.
+ * Runs green on the LLVM backend on both windows-amd64 and linux-amd64 (run 35336454135), so it
+ * does NOT reproduce that crash; see the journal's task-3 finding. Kept as the starting point for
+ * whoever picks the crash up next.
  */
 public class Excgc {
     static final class Boom extends Exception {

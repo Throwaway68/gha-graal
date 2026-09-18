@@ -1013,8 +1013,8 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   - **cloudflared quick tunnel, no inbound port.** `cloudflared tunnel --url tcp://localhost:22`
     publishes `https://<name>.trycloudflare.com` in its log after ~3 s; the local end reaches it with
     `ssh -o ProxyCommand='cloudflared access tcp --hostname %h'`. The hostname goes into artifact
-    `ssh-<platform>`, not into the log, because a job's log is not readable through the API while the
-    job runs - the same reason the tmate block publishes an artifact.
+    `ssh-<platform>` - the artifact is the delivery channel because a job's log is not readable through the API while the
+    job runs, the same reason the tmate block publishes an artifact.
 - 2026-09-18 (task 2, run https://github.com/Throwaway68/gha-graal/actions/runs/35326741758):
   **`stress` is green on linux-amd64 - `DEV-RUN OK` - but only after two of its checks were split
   into programs of their own**, because the LLVM backend crashes the process on both. It took three
@@ -1242,18 +1242,21 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   - `acd5863e29d` - `LLVMGenerator.emitReadCallerStackPointer` builds the caller's stack pointer on
     Windows from `llvm.addressofreturnaddress() + 1 word` instead of
     `llvm.frameaddress(0) + getCallerSPOffset()`, because on Win64 `llvm.frameaddress(0)` is the SEH
-    establisher frame (`rbp - SEHFrameOffset`, i.e. this frame's own stack pointer for frames up to
-    128 bytes), not the frame-pointer chain node, so every stack walk started inside the frame it
-    should have started above. Without it `getStackTrace()` reads a local as a return address.
+    establisher frame, `rbp - SEHFrameOffset`, and the prologue set `rbp = rsp + SEHFrameOffset`, so
+    it is this frame's own post-prologue stack pointer whatever the frame size (the 128-byte cap on
+    `SEHFrameOffset` only decides where `rbp` sits inside the frame) - never the frame-pointer chain
+    node - so every stack walk started inside the frame it should have started above. Without it `getStackTrace()` reads a local as a return address.
   - `61c1437467e` - `LLVMObjectFileReader` reads the batch object's `.text$svm1` back and
     `LLVMWindowsSupport.returnAddressOffset` moves a statepoint `Call` infopoint one byte earlier
     when a `0x90` sits in front of the recorded offset, because `maybeEmitNopAfterCallForWindowsEH`
     pads a call that is the last instruction before the epilogue and the stack map label then names
     the padding. Without it every image died in its first collection with "No reference map
     information found".
-  - `4def28820c5` - no behaviour change: corrects the two comments above (`llvm.frameaddress(0)` is
-    `rbp - min(frame size, 128)` rounded down to 16, not simply RSP; a shifted statepoint record
-    always fails loudly, see the correction below) and adds a `VMError.guarantee` so a batch object
+  - `4def28820c5` - no behaviour change: corrects the two comments above (a shifted statepoint record
+    always fails loudly, see the correction below; the `llvm.frameaddress(0)` comment it rewrote says
+    "rbp - 128 for anything larger than 128 bytes", which is imprecise - `rbp - SEHFrameOffset` is the
+    post-prologue RSP for every static frame size, as stated above; the final review of round 2 found
+    this and the comment gets reworded in round 3's first graal commit) and adds a `VMError.guarantee` so a batch object
     without a `.text$svm1` section is reported by name instead of NPE-ing inside
     `returnAddressOffset`.
 

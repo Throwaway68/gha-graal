@@ -145,7 +145,7 @@ Releases of the Windows backend branch, newest first:
   division, class cast, array store, negative array size), rethrow-and-wrap through a lambda,
   `finally` ordering, garbage collections taken through live frames, a weak reference that must be
   cleared and enqueued, 1 GiB of allocation pressure with a checked survivor set, threads
-  (start/join, `synchronized`, `wait`/`notify`, collections taken while eight threads run) and an
+  (start/join, `synchronized`, `wait`/`notify`, collections taken while four workers recurse and eight more allocate) and an
   uncaught exception on a second thread. Eleven `OK <check>` lines and `STRESS OK`; see the journal
   for what each Windows-specific piece does.
 - [`graalvm-round1-win-llvm`](https://github.com/Throwaway68/gha-graal/releases/tag/graalvm-round1-win-llvm):
@@ -156,7 +156,10 @@ Releases of the Windows backend branch, newest first:
 
 What `stress` does **not** cover, and is therefore still open: `tests/programs/overflow` (a
 `StackOverflowError` caught after recursion) fails on windows-amd64 *and* on linux-amd64, so it is a
-backend bug rather than a Windows one; JNI in both directions and a throw across an MSVC-compiled
+backend bug rather than a Windows one; a caught exception inside an allocating eight-thread loop
+crashed the linux-amd64 image with stale references after the catch (run 35325689605) and was taken
+out of `stress`, and `tests/programs/excgc`, written to reproduce it single-threaded, passes on both
+platforms, so that crash is unreproduced and unexplained; JNI in both directions and a throw across an MSVC-compiled
 frame are untested (round 4); and the substratevm LLVM gate has not been run on this branch
 (round 3). The journal has the detail for each.
 

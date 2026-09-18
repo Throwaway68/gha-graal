@@ -55,6 +55,7 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           path: ci
+          persist-credentials: false   # nothing here pushes; keeps the job token out of .git/config during an ssh session
       - name: Checkout graal
         uses: actions/checkout@v7.0.1
         with:
@@ -62,6 +63,7 @@ jobs:
           ref: ${{ inputs.graal_ref }}
           path: graal
           fetch-depth: 1
+          persist-credentials: false
       - name: Derive paths
         shell: bash
         # JDK_ID and GRAAL_SHA are not used by any later step; they are here so that every step's
