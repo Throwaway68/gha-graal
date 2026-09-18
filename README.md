@@ -32,8 +32,9 @@ GraalVM-convention function on Win64 gets the Win64 argument registers but no 32
 C callers and every entry point with more than four arguments disagree about the fifth one. Nothing
 changes off Windows. The Windows LLVM backend needs that release.
 
-**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round1-win-llvm`
-(those two are also the defaults). Builds any graal ref against the LLVM release: graal's
+**GraalVM** (`graalvm.yml`): `gh workflow run graalvm.yml -f graal_ref=graal/25.3.4.1-win-llvm -f llvm_release=llvm-22.1.8-graal.3 -f label=round1-win-llvm -f platforms=linux-amd64,windows-amd64`
+(the first two are also the defaults; `platforms` must exclude darwin-aarch64 for now, see the
+platform status below). Builds any graal ref against the LLVM release: graal's
 downloads from `lafo.ssw.uni-linz.ac.at/pub/llvm` are redirected with `MX_URLREWRITES`
 (pattern + digest override), so no suite file is edited. Every platform runs
 `scripts/graalvm/smoke.sh` (java, native-image, `lli`, a C hello world through the bundled
@@ -63,9 +64,9 @@ Maven Central as graal-style *shadowed* jars (`org.bytedeco` relocated to
 `com.oracle.svm.shadowed.org.bytedeco`, `open module
 com.oracle.svm.shadowed.org.bytedeco.{javacpp,llvm}.windows.x86_64` in
 `META-INF/versions/9`), the same shape as Oracle's linux/macOS jars. Publishes release
-`jars-<version>` with the two jars and `manifest.json` (sha512); graal's
-`LLVM_PLATFORM_SPECIFIC_SHADOWED` / `JAVACPP_PLATFORM_SPECIFIC_SHADOWED` windows-amd64
-entries point at those URLs. The relocation itself is `scripts/jars/shadow.py`.
+`jars-<version>` with the two jars and `manifest.json` (sha512). The relocation itself is
+`scripts/jars/shadow.py`. Nothing consumes the release today: `graal/25.3.4.1-win-llvm` took the
+stock `org.bytedeco` jars instead, so `jars-1.5.7-graal.1` stays published only as a record.
 
 **Windows EH spike** (`spike-win-eh.yml`): `gh workflow run spike-win-eh.yml -f llvm_release=llvm-22.1.8-graal.3`.
 A standalone windows-2022 check of the assumptions the Windows backend rests on, from
@@ -88,8 +89,10 @@ the evidence behind the design decisions recorded in the journal.
    `graalvm.yml` and `graalvm-dev.yml`. It requires LLVM release `llvm-22.1.8-graal.3` or newer
    (Win64 home space for `CallingConv::GRAAL` plus the Windows libunwind); with
    `llvm-22.1.8-graal.2` the image still links, but a JNI entry point with more than four
-   arguments reads argument five 32 bytes low and the image faults. The
-   windows-amd64 JavaCPP/LLVM jars it points at come from release `jars-1.5.7-graal.1`.
+   arguments reads argument five 32 bytes low and the image faults. For JavaCPP and LLVM it uses
+   the **stock `org.bytedeco` jars from Maven Central on every platform**, not Oracle's shadowed
+   ones, so release `jars-1.5.7-graal.1` is *not* a dependency of this branch - it is a retained
+   record of what was tried in task 4 and nothing references it (see the journal's Decisions).
    `graal/25.3.4.1-ci` stays as it was, for comparing against the darwin-only change.
 
 ## Platform status (2026-09-17)
@@ -112,7 +115,9 @@ On darwin-aarch64 the branch registers the backend as well - the module problem 
 platform - but the smoke test still fails in the backend: `llc` refuses
 `llvm.read_register`/`llvm.write_register` on `x27` and `x28` (heap base and thread pointer), so
 no aarch64 batch compiles. That is open for round 2 and the reason release
-`graalvm-round1-win-llvm` carries linux-amd64 and windows-amd64 only.
+`graalvm-round1-win-llvm` carries linux-amd64 and windows-amd64 only. Until it is fixed, a release
+build has to be started with `-f platforms=linux-amd64,windows-amd64`: the release job needs every
+matrix job, so one failing darwin job means no release at all.
 
 The backend's tool macro sets the experimental `-H:CompilerBackend=llvm` option, so use
 `native-image -H:+UnlockExperimentalVMOptions --tool:llvm-backend ...` (or leave
