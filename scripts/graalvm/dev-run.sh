@@ -67,7 +67,7 @@ if ls "$P"/*.c >/dev/null 2>&1; then
     # -isysroot (run 35355589921 failed exactly there).
     Darwin)               lib="$W/lib$name.dylib"; cflags=(-dynamiclib "-I$H/include" "-I$H/include/darwin")
                           sdk=$(xcrun --show-sdk-path 2>/dev/null) || sdk=""
-                          [ -n "$sdk" ] && cflags=("${cflags[@]}" -isysroot "$sdk");;
+                          if [ -n "$sdk" ]; then cflags=("${cflags[@]}" -isysroot "$sdk"); fi;;
     *)                    lib="$W/lib$name.so";    cflags=(-shared -fPIC "-I$H/include" "-I$H/include/linux");;
   esac
   "$CLANG" -O1 ${cflags[@]+"${cflags[@]}"} "$P"/*.c -o "$lib"

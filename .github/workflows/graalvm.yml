@@ -218,7 +218,7 @@ jobs:
           GraalVM CE built from \`Throwaway68/graal@${{ inputs.graal_ref }}\` with the LLVM toolchain from release \`${{ inputs.llvm_release }}\`.
           Platforms in this release: ${{ inputs.platforms }}.
           Components: CE base, LLVM.org toolchain, Sulong (LLVM runtime), Native Image LLVM backend where the branch registers it.
-          Native Image LLVM backend: every platform of this release builds and runs \`tests/programs/stress\` (exceptions, GC, threads), \`tests/programs/complex\` (JNI in both directions plus a \`@CEntryPoint\` entered from C through a function pointer) and \`tests/programs/export\` (a \`@CEntryPoint\` resolved by its symbol) with \`--tool:llvm-backend\` in this run's smoke test.
+          Native Image LLVM backend: where the branch registers it, every platform of this release builds and runs \`tests/programs/stress\` (exceptions, GC, threads), \`tests/programs/complex\` (JNI in both directions plus a \`@CEntryPoint\` entered from C through a function pointer) and \`tests/programs/export\` (a \`@CEntryPoint\` resolved by its symbol) with \`--tool:llvm-backend\` in this run's smoke test.
           The Windows backend needs \`llvm-22.1.8-graal.3\` or newer: it carries the Win64 home-space fix for \`CallingConv::GRAAL\` and libunwind for \`x86_64-w64-windows-gnu\`.
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
