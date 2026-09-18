@@ -300,6 +300,61 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
     msvc/mingw stack-probe question remains theoretical (no probe symbol appears in any image so
     far).
 
+- 2026-09-18: **substratevm's gate runs on the LLVM backend, and `build,helloworld` is green on
+  linux-amd64 and windows-amd64** (round 3, task 1; graal `54969a2cee8`, LLVM release
+  `llvm-22.1.8-graal.3`, workflow `.github/workflows/graalvm-gate.yml` on `round3-gate`).
+
+  ```
+    Versions                             ok       0:00:00.769542
+    JDKReleaseInfo                       ok       0:00:00
+    VerifyMultiReleaseProjects           ok       0:00:00.015624
+    Clean                                ok       0:00:00.093753
+    BuildWithJavac                       ok       0:05:49.370366
+    image demos                          ok       0:26:41.044105
+    Validate JSON build info             ok       0:01:12.245178
+    Validate synchronized skills assets  ok       0:00:00.016112
+    -----------------------------------  -------  -------
+    Gate                                 ok       0:33:43.554680
+    GATE PASSED
+  ```
+
+  - **windows-amd64** https://github.com/Throwaway68/gha-graal/actions/runs/35363499659: job 35m20s,
+    gate step 33m46s, of which `image demos` 26m41s.
+  - **linux-amd64** https://github.com/Throwaway68/gha-graal/actions/runs/35363511118: job 24m58s,
+    gate step 23m51s, `image demos` 18m49s, the same eight tasks, `GATE PASSED`.
+
+  `image demos` is not a hello world: it builds and runs a native `javac` (37,607 reachable
+  methods, `javac.exe` 33.98 MiB), four helloworld variants including one **shared library**
+  called through ctypes and one with FlightRecorder, `cinterfacetutorial` (a DLL called from C,
+  with callbacks into Java) and `clinittest` - every one of them through
+  `--tool:llvm-backend`. How the gate is invoked, identically on both platforms except for the
+  shell:
+
+  ```
+  cd graal/substratevm
+  mx --strict-compliance gate --strict-mode --tags build,helloworld \
+     --extra-image-builder-arguments="-H:+UnlockExperimentalVMOptions --tool:llvm-backend -H:-UnlockExperimentalVMOptions"
+  ```
+
+  with no `--env` and no `COMPONENTS` (see the finding on how the gate finds the backend), on
+  windows-amd64 through `mx.cmd` from `cmd`, with the log buffered to a file because `cmd` has no
+  `tee`. `scripts/graalvm/gate-summary.py` turns that log into the table above, and the artifact
+  `gate-<platform>-<run-id>` carries both.
+
+  Getting there took three fixes on `graal/25.3.4.1-win-llvm`, each with a finding below:
+  `979f76f9073` (an `@Uninterruptible` method must not depend on an intrinsic the LLVM backend does
+  not register), `5f21e16095b` (79,723 `/EXPORT:` directives in the image object, `LNK1189`) and
+  `54969a2cee8` (a shared library exported none of its entry points). Only the first is visible off
+  Windows; the other two are PE/COFF-scoped.
+
+  **`hellomodule` is not green and cannot be, on any platform.** Its fourth variant
+  (`-H:+RuntimeClassLoading -H:+AllowJRTFileSystem`) pulls in the Ristretto interpreter, whose
+  bytecode-handler stubs use Graal's multi-value return; the LLVM backend does not implement it and
+  cannot without a new calling-convention behaviour in the toolchain. linux-amd64 fails exactly like
+  windows-amd64 (runs 35350001924 and 35350012194). The other three variants build and run under the
+  backend on both platforms - a Java *module* image on the Windows LLVM backend works.
+
+
 ## Findings
 
 - 2026-09-17 (runs https://github.com/Throwaway68/gha-graal/actions/runs/35232589440,
@@ -1272,6 +1327,171 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   explanation was wrong: `4def28820c5` corrects it in the source and the `61c1437467e` finding above
   is corrected in place, where it used to say that in a method with more than one call the shift is
   silent and worse than a crash.
+
+
+- 2026-09-18 (round 3, task 1, runs https://github.com/Throwaway68/gha-graal/actions/runs/35346576305
+  and https://github.com/Throwaway68/gha-graal/actions/runs/35346608852): **the gate finds the LLVM
+  backend by itself - no `--env`, no `COMPONENTS`, no `--dynamicimports`.** `graalvm-gate.yml` runs
+  `mx --strict-compliance gate --strict-mode --tags <tags>
+  --extra-image-builder-arguments="-H:+UnlockExperimentalVMOptions --tool:llvm-backend
+  -H:-UnlockExperimentalVMOptions"` from `graal/substratevm` and nothing else; the gate builds its
+  own GraalVM home (`graal/sdk/mxbuild/<platform>/GRAALVM_<hash>_JAVA25/.../bin/native-image`) and
+  `--tool:llvm-backend` resolves in it on both platforms. Why: `svml` is registered by substratevm's
+  own mx suite wherever `llvm_supported` holds - on this branch that is every platform - and its
+  only dependency, `llp` (LLVM.org toolchain), comes from the sdk suite, which substratevm imports;
+  with no `--components` restriction in the environment `mx_sdk_vm_impl` includes every registered
+  component. So the dev loop's `mx-env/ce-llvm-dev` must *not* be activated for a gate run: its
+  `COMPONENTS` list would restrict that home. The env file is still copied into
+  `graal/vm/mx.vm/` by the workflow, for an ssh session that wants the dev build.
+
+- 2026-09-18 (round 3, task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35346576305):
+  **`END:` in an mx gate log does not mean the task passed.** `Task.__exit__` (mx
+  `src/mx/_impl/mx_gate.py`) calls `stop()`, which logs `gate: ... END: <title> [<duration>]`, while
+  the exception that killed the task is still propagating; only the outermost task, titled `Gate`,
+  is logged as `ABORT:`, and mx's own `Gate task times:` summary is never printed for a failed gate.
+  The run above logged `END:   module build demo [0:08:55.555972]` for the task the gate died in.
+  `scripts/graalvm/gate-summary.py` therefore blames the last task that *began* when the gate
+  aborted, and prints the last command of mx's "sequence of mx commands that were executed until the
+  failure" block, which names the exact image build that failed - four `hellomodule` variants are
+  one gate task. `tests/test_gate_summary.py` pins this against a 20-line excerpt of that log.
+
+- 2026-09-18 (round 3, task 1, runs https://github.com/Throwaway68/gha-graal/actions/runs/35346576305,
+  https://github.com/Throwaway68/gha-graal/actions/runs/35346608852,
+  https://github.com/Throwaway68/gha-graal/actions/runs/35348465578 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35350022257; graal commit `979f76f9073`):
+  **under the LLVM backend an `@Uninterruptible` method must not rely on an intrinsic to get rid of
+  a callee that is not `@Uninterruptible`.** The fourth `hellomodule` variant
+  (`-H:+RuntimeClassLoading -H:+AllowJRTFileSystem`) fails in the image builder with
+
+  ```
+  Found 1 violations of @Uninterruptible usage:
+  - Missing @Uninterruptible annotation: com.oracle.svm.interpreter.InterpreterSupportImpl
+    .isInterpreterBytecodeRoot(FrameInfoQueryResult):boolean is annotated with @Uninterruptible,
+    but calls java.lang.String.equals(Object):boolean which is not annotated.
+  ```
+
+  identically on linux-amd64 and windows-amd64, and identically on the pristine upstream tag
+  `graal-25.3.4.1` (run 35348465578) - but the same tag with the same tags and *without*
+  `--tool:llvm-backend` is green (run 35350022257, 11m41s). So it is the backend, not the version:
+  hypothesis (strongly supported, not proven to the node count) - `LLVMFeature` installs
+  `LLVMGraphBuilderPlugins` as the `TargetGraphBuilderPlugins` singleton, a much smaller set than
+  the AMD64 one, so `String.equals` is not intrinsified, its graph is no longer trivial for
+  `CompileQueue`'s trivial inliner, the call survives into the compilation graph and
+  `UninterruptibleAnnotationChecker.checkCallees` - which reads
+  `method.compilationInfo.getCompilationGraph()` - reports it. Fixed on the branch in `979f76f9073`
+  by calling `UninterruptibleUtils.String.equals`, the uninterruptible comparison SVM already has
+  (with a null guard: `String.equals` tolerates a null argument and that helper does not, and
+  `FrameInfoQueryResult.getSourceMethodName()` can be null). Expect more of these wherever
+  uninterruptible code calls a JDK method that only the platform backends intrinsify.
+
+- 2026-09-18 (round 3, task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35350001924,
+  graal `979f76f9073`): **the Ristretto interpreter's bytecode-handler stubs need multi-value
+  returns, which the LLVM backend does not implement.** With the `@Uninterruptible` violation fixed,
+  the same fourth `hellomodule` variant dies one step later, once per handler stub:
+
+  ```
+  jdk.graal.compiler.graph.GraalGraphError: jdk.graal.compiler.debug.GraalError: unimplemented:
+    the LLVM backend doesn't produce an LIRGenerationResult
+    at method: long com.oracle.svm.interpreter.Interpreter$Root.__stub_aconstNullHandler(
+       long, long, Interpreter$Root$State, byte[], InterpreterFrame, long[], Object[]) [entry point]
+    at com.oracle.svm.core.graal.llvm.LLVMGenerator.getResult(LLVMGenerator.java:1672)
+    at jdk.graal.compiler.lir.gen.LIRGeneratorTool.emitMultiReturns(LIRGeneratorTool.java:192)
+    at jdk.graal.compiler.nodes.ReturnNode.generate(ReturnNode.java:73)
+  ```
+
+  `ReturnNode.generate` turns a `MultiReturnNode` into `emitMultiReturns`, whose default
+  implementation moves the additional results into the *argument* registers of the calling
+  convention (`getResult().getCallingConvention()`) and can also emit a tail call. The LLVM backend
+  has no `LIRGenerationResult` at all, and neither the register assignment of the extra results nor
+  the tail call is expressible in LLVM IR without a new calling-convention behaviour in the
+  toolchain - i.e. an LLVM patch and a rebuild. **Not Windows-specific and not new in this branch:
+  it is on linux-amd64 too, and it blocks the fourth `hellomodule` variant on every platform.** The
+  other three variants build and run under the backend on both platforms (see the milestone below).
+  Out of reach for round 3 task 1; recorded for the controller to schedule.
+
+- 2026-09-18 (round 3, task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35348125338):
+  **the `helloworld` tag's last task needs the Python module `jsonschema`.** After every image of
+  the tag has been built, `Validate JSON build info` (`mx_substratevm.py:667`) builds one more
+  helloworld with `-H:BuildOutputJSONFile` / `-H:+GenerateBuildArtifactsFile` and validates the two
+  JSON files against the schemas in `graal/docs/reference-manual/native-image/assets`; without the
+  module it aborts with `Python module "jsonschema" is required to validate reachability metadata
+  but was not found`. `graalvm-gate.yml` installs it into `$MX_PYTHON` - `python` on windows-2022,
+  `python3` elsewhere - because that is the interpreter mx runs the gate with. Note the image of
+  that task is built *without* `--extra-image-builder-arguments`, so it is the only image of the tag
+  that does not go through the LLVM backend.
+
+- 2026-09-18 (round 3, task 1): **three mechanics of driving a new workflow from the outside.**
+  (1) A workflow that has never run cannot be dispatched at all - `gh workflow run` and the REST
+  dispatch both answer `HTTP 404 ... not found on the default branch` (the round-2 dead end below).
+  Registering it is enough, and a one-commit `push:` trigger on the feature branch with the job
+  `if: github.event_name != 'push'` does that in 20 seconds (run 35346547643, job skipped); the
+  trigger was reverted in the next commit and `gh workflow run graalvm-gate.yml --ref round3-gate`
+  has worked ever since, without the workflow ever being on `main`.
+  (2) `actions/checkout` rejects an abbreviated commit (`graal_ref=979f76f9073` fails the step with
+  `The process '/usr/bin/git' failed with exit code 1`, runs 35349177616 / 35349190625); the full 40
+  characters work.
+  (3) `gh workflow run -f input=` does **not** pass an empty string - the input keeps its default.
+  Two runs meant as backend-off controls (35348112827, 35348465578) therefore ran *with*
+  `--tool:llvm-backend`; the control had to be redone with a harmless non-empty value
+  (`-f extra_image_builder_args=-H:+ReportExceptionStackTraces`, run 35350022257).
+
+
+- 2026-09-18 (round 3, task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35351657094
+  and the ssh session on https://github.com/Throwaway68/gha-graal/actions/runs/35354224948; graal
+  commit `5f21e16095b`): **the image's data symbols must not be `/EXPORT:`ed on Windows - link.exe
+  takes at most 65535 exports.** The `helloworld` tag's first image, `javac-image`, dies in the
+  final link with
+
+  ```
+  LINK : fatal error LNK1189: library limit of 65535 objects exceeded
+  ```
+
+  while `hello` and `stress` link fine. What it is *not*, measured on the runner by replaying the
+  linker command: not the import library (`/NOIMPLIB` in place of `/IMPLIB:` changes nothing), not
+  `llvm.obj` (the link fails the same way with the code object removed), and not an input library
+  (the largest of the JDK/SVM archives has 50 members). It is `javac.obj`, the image object: 5
+  sections, 104,044 symbols and a **6.1 MB `.drectve` section holding 79,723 `/EXPORT:` directives**
+  - `/EXPORT:constant_ClassNameSupport_...#0,DATA`, `/EXPORT:global_FunctionPointerLogHandler_...`,
+  one per constant and per CGlobalData item that `LLVMNativeImageCodeCache.patchMethods` defines so
+  that the separate code object can reference the image's data by name. It passed `exported = true`
+  to `ObjectFile.createDefinedSymbol`, and `PECoffSymtabStruct.addSymbolEntry` turns that into a
+  `/EXPORT:` directive, i.e. an entry in the executable's *export table*. External linkage is all
+  those symbols need. The fix (`5f21e16095b`) defines them global but not exported on PE/COFF and
+  leaves ELF and Mach-O as upstream has them. Proof before the fix was written: with the section
+  removed from the very same object (`llvm-objcopy --remove-section=.drectve javac.obj`), the
+  identical link command returns 0, produces a 35.6 MB `javac.exe`, and that image compiles a class
+  (`javac -proc:none -Djava.home= --system none -p $JAVA_HOME/jmods`, the gate's own invocation -
+  bare `javac.exe` NPEs in `Locations.<clinit>`, which is upstream's documented reason for passing
+  `-Djava.home=`). Note how this scales: the limit is crossed by image size, so it was invisible for
+  the whole of rounds 1 and 2 and would have been invisible for any hello-world-sized test.
+
+
+- 2026-09-18 (round 3, task 1, run https://github.com/Throwaway68/gha-graal/actions/runs/35357858740
+  and the ssh session on https://github.com/Throwaway68/gha-graal/actions/runs/35360046516; graal
+  commit `54969a2cee8`): **a shared library built with the LLVM backend on Windows exported nothing
+  at all.** Once javac-image linked, the next image of the `helloworld` tag - `helloworld --shared`
+  - built a `helloworld.dll` whose caller could not find its entry point:
+
+  ```
+  File "...mx_substratevm.py", line 1604, in _helloworld
+    lib.run_main(argc, argv)  # call run_main of shared lib
+  AttributeError: function 'run_main' not found
+  ```
+
+  Cause, read off the source rather than guessed: with the LLVM backend the code lives in the
+  separate linked object, so `LLVMNativeImageCodeCache`'s `defineMethodSymbol` override only
+  *declares* each method in the image object (`objectFile.createUndefinedSymbol(name, true)`) - and
+  it dropped the `exported` flag that `NativeImage`'s text section passes for entry points. On ELF
+  and Mach-O that costs nothing, because the final link exports what is globally visible; on PE/COFF
+  an export is a `/EXPORT:<name>` directive and there was nobody left to emit one. Pre-existing and
+  invisible until now: rounds 1 and 2 only ever built executables. Fixed in `54969a2cee8` -
+  `ObjectFile.createUndefinedSymbol` gains an `exported` variant that only PE/COFF acts on, and
+  `PECoffSymtabStruct` no longer insists that an exported symbol be *defined* in the object that
+  exports it, which is sound because `/EXPORT:` names a symbol of the whole link. Verified on the
+  runner at that commit: `mx helloworld --shared --tool:llvm-backend` returns 0 and its ctypes
+  caller prints `b'Hello from native-image!\r\n'` out of `run_main`, and `mx cinterfacetutorial`
+  passes too - a DLL called from C with callbacks into Java, which is the first time this port has
+  run that direction.
 
 
 ## Decisions
