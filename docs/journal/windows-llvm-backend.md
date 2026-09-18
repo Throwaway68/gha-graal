@@ -523,6 +523,47 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   `Interpreter$Root.__stub_aaloadHandler`). The other three variants build and run under the backend
   on both platforms - a Java *module* image on the Windows LLVM backend works.
 
+- 2026-09-18 (task 2): **the substratevm gate under the LLVM backend, tag by tag, on windows-amd64,
+  with linux-amd64 as the reference** - graal `fb017323af7`, LLVM `llvm-22.1.8-graal.3`, workflow
+  `graalvm-gate.yml` on `round3-gate2`. Every tag was run on Windows first; every run below is at
+  the final commit unless the cell says otherwise, and the Linux column is the no-regression check
+  at that same commit.
+
+  | tag | windows-amd64 | linux-amd64 | result |
+  |-----|---------------|-------------|--------|
+  | `build,native_unittests` | [35380311997](https://github.com/Throwaway68/gha-graal/actions/runs/35380311997) 32m40s | [35380363276](https://github.com/Throwaway68/gha-graal/actions/runs/35380363276) 21m54s | **green**, 4 tests blacklisted |
+  | `build,all_native_unittests --partial 1/2` | [35380348948](https://github.com/Throwaway68/gha-graal/actions/runs/35380348948) 55m43s | [35380400267](https://github.com/Throwaway68/gha-graal/actions/runs/35380400267) 55m30s | **green**, 4 tests blacklisted |
+  | `build,all_native_unittests --partial 2/2` | [35380356446](https://github.com/Throwaway68/gha-graal/actions/runs/35380356446) 55m00s | [35380407856](https://github.com/Throwaway68/gha-graal/actions/runs/35380407856) 51m45s | **green** |
+  | `build,check_svm_invariants` | [35380319303](https://github.com/Throwaway68/gha-graal/actions/runs/35380319303) 4m29s | [35380370096](https://github.com/Throwaway68/gha-graal/actions/runs/35380370096) 4m14s | **green**, first try |
+  | `build,condconfig` | [35380326588](https://github.com/Throwaway68/gha-graal/actions/runs/35380326588) 10m08s | [35380377849](https://github.com/Throwaway68/gha-graal/actions/runs/35380377849) 7m48s | **green** after `fa7e94b1f90` |
+  | `build,java_agent` | [35380333677](https://github.com/Throwaway68/gha-graal/actions/runs/35380333677) 15m24s | [35380385079](https://github.com/Throwaway68/gha-graal/actions/runs/35380385079) 13m38s | **green**, first try |
+  | `build,java_desktop_integration` | [35378067180](https://github.com/Throwaway68/gha-graal/actions/runs/35378067180) 43m26s | [35378074436](https://github.com/Throwaway68/gha-graal/actions/runs/35378074436) 18m07s | **green** after `ffcc40a2601` + `c0eda3552e6` |
+  | `build,truffle_unittests` | [35380341570](https://github.com/Throwaway68/gha-graal/actions/runs/35380341570) 6m59s | [35380392612](https://github.com/Throwaway68/gha-graal/actions/runs/35380392612) 3m09s | **known gap**, both platforms: GR-43073 |
+  | `debuginfotest`, standalone pointsto unittests | - | - | **skipped on Windows** by `svm_gate_body` itself |
+  | `hellomodule` | - | - | **known gap**, both platforms (task 1): multi-value return |
+
+  Seven of the eight tags this round set out to make green on windows-amd64 are green; the eighth,
+  `truffle_unittests`, cannot build its image on any platform because the LLVM backend does not
+  implement runtime compilation, and upstream aborts with that message itself.
+
+  **Six root causes, five fixed and two classes of test blacklisted** (every one measured on both
+  platforms before it was called a Windows problem - and only two of them were):
+
+  | # | what | where | fix |
+  |---|------|-------|-----|
+  | 1 | `ForeignTests$TestFeature` aborts every junit image (FFM API is off with the backend) | both platforms | graal `a9d95d4cb5e` + 2 classes blacklisted |
+  | 2 | `condconfig` writes the agent into a `svmbuild` nobody created | both platforms, not backend-related | graal `fa7e94b1f90` |
+  | 3 | 4 JFR tests need real virtual threads; continuations are off with the backend | both platforms | 4 classes blacklisted (`3050c26b0a3`) |
+  | 4 | the 4 `-H:+RuntimeClassLoading` groups compile the interpreter's multi-value-return stubs | both platforms | 4 classes blacklisted (`5f37c13b287`) |
+  | 5 | the deadlock watchdog kills a big image inside the single PE/COFF `llvm-link` | **windows only** | graal `ffcc40a2601` (+ `fb017323af7`) |
+  | 6 | `Math.rint` -> `llvm.roundeven` -> `roundeven`, which MSVC's UCRT does not have | **windows only** | graal `c0eda3552e6` |
+
+  Ten test classes are excluded, all of them in `substratevm/mx.substratevm/llvm-unittest-blacklist`
+  with the reason and the run that measured it; the file is used only when the build arguments
+  contain `--tool:llvm-backend` and the caller passed no `--blacklist`, so nothing changes for a
+  build without the backend. `native_unittests` then runs 252 tests green on linux-amd64 and 225 on
+  windows-amd64 (Windows also ignores `ProcessPropertiesTest`, GR-24075, from upstream).
+
 
 ## Findings
 
@@ -1856,6 +1897,173 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   caller prints `b'Hello from native-image!\r\n'` out of `run_main`, and `mx cinterfacetutorial`
   passes too - a DLL called from C with callbacks into Java, which is the first time this port has
   run that direction.
+
+- 2026-09-18 (task 2, runs https://github.com/Throwaway68/gha-graal/actions/runs/35370132707 (linux)
+  and https://github.com/Throwaway68/gha-graal/actions/runs/35370081686 (windows), fix graal
+  `a9d95d4cb5e`): **every native unittest image died in `ForeignTests$TestFeature`, because the
+  Foreign Function and Memory API is switched off with the LLVM backend by upstream policy.**
+
+  The default `svmjunit` image aborts after ten seconds with
+
+  ```
+  Feature defined by com.oracle.svm.test.foreign.ForeignTests$TestFeature unexpectedly failed
+  Caused by: java.lang.Error: ImageSingletons do not contain key
+      org.graalvm.nativeimage.impl.RuntimeForeignAccessSupport
+      at ...RuntimeForeignAccess.registerForDowncall(RuntimeForeignAccess.java:79)
+      at com.oracle.svm.test.foreign.ForeignTests$TestFeature.duringSetup(ForeignTests.java:134)
+  ```
+
+  This is not a bug and not a Windows problem. `SubstrateOptions.isForeignAPIEnabled()`
+  (`SubstrateOptions.java:1601-1607`) returns `!useLLVMBackend()`, and
+  `ConcealedOptions.validateForeignAPISupport` (:1394-1397) turns an explicit `-H:+ForeignAPISupport`
+  into `UserError: Support for the Foreign Function and Memory API is not available with the LLVM
+  backend`. `ForeignFunctionsFeature.isInConfiguration` is therefore false, nothing adds
+  `RuntimeForeignAccessSupport` to `ImageSingletons`, and the *test* feature - which the gate
+  harness registers into **every** junit image through `_native_unittest_features`, whether or not
+  a foreign test is selected - blows up in `duringSetup`.
+
+  Consequences for this round: a `--blacklist` alone cannot help, because the feature is registered
+  independently of the selected test classes. The fix drops that one feature from the list when the
+  image builder arguments contain `--tool:llvm-backend`, and adds
+  `substratevm/mx.substratevm/llvm-unittest-blacklist` with `com.oracle.svm.test.foreign.*` (2 test
+  classes: `ForeignTests`, `SharedArenaBulkCopyTest`). `_native_unittest` uses that file only when
+  the backend is selected *and* the caller passed no `--blacklist`, so a build without the backend,
+  and an upstream checkout that has no such file, behave exactly as before. This is the blacklist
+  hook the plan asked for; it is now available for any further LLVM-backend-only exclusion.
+
+- 2026-09-18 (task 2, runs https://github.com/Throwaway68/gha-graal/actions/runs/35370162645 (linux)
+  and https://github.com/Throwaway68/gha-graal/actions/runs/35370062176 (windows)): **the
+  `truffle_unittests` tag cannot pass under the LLVM backend on any platform: runtime compilation
+  is unimplemented there, and upstream says so itself.** Both of the tag's tasks build their image
+  with `--macro:truffle`, which pulls in `RuntimeCompilationFeature`, whose `duringSetup` starts
+
+  ```java
+  if (SubstrateOptions.useLLVMBackend()) {
+      throw UserError.abort("Runtime compilation is currently unimplemented on the LLVM backend (GR-43073).");
+  }
+  ```
+
+  (`RuntimeCompilationFeature.java:413-416`). The gate task dies 13 s (linux) / 31 s (windows) after
+  it starts, with that exact message. Nothing can be blacklisted: the abort is in the image the tag
+  exists to build, not in a test. This is the same class of open item as `hellomodule` - a backend
+  feature that does not exist, not a Windows regression - and it is out of this round's reach
+  (GR-43073 is Oracle's own ticket for it).
+
+- 2026-09-18 (task 2, runs https://github.com/Throwaway68/gha-graal/actions/runs/35370148169 (linux)
+  and https://github.com/Throwaway68/gha-graal/actions/runs/35370057590 (windows), fix graal
+  `fa7e94b1f90`): **`condconfig` fails two seconds in, and it has nothing to do with the backend:
+  the gate writes the native-image agent into a directory nobody created.**
+
+  ```
+  Error: Writing image to non-existent directory <suite output>/svmbuild is not allowed.
+         Create the missing directory if you want the image to be written to that location.
+  Failed to query native-image.
+  ```
+
+  `build_native_image_agent` (`mx_substratevm.py:177-181`) passes `-o <svmbuild>/native-image-agent`
+  with `--macro:native-image-agent-library`; `svmbuild` is only ever created as a side effect of
+  another gate task (`helloworld` passes it as `--output-path`, `debuginfotest` as `--output-path`).
+  Oracle's `basics` job runs `helloworld` before `condconfig` in the same process, so the gap is
+  invisible there and shows up the moment a tag is run on its own - which is exactly how this round
+  measures one tag at a time. `mx_util.ensure_dir_exists(svmbuild_dir())` in
+  `build_native_image_agent` is a no-op when the directory exists. Proven platform-independent: the
+  same two-second abort on linux-amd64 and windows-amd64, and the failing command
+  (`--macro:native-image-agent-library`) never sees the extra image builder arguments at all.
+
+- 2026-09-18 (task 2, runs https://github.com/Throwaway68/gha-graal/actions/runs/35371119827 (linux)
+  and https://github.com/Throwaway68/gha-graal/actions/runs/35371088929 (windows), blacklist graal
+  `3050c26b0a3`): **the native unittest image runs under the backend on both platforms, and the
+  only four tests that fail are the ones that need a *real* virtual thread.** 256 tests on
+  linux-amd64, 229 on windows-amd64 (Windows ignores `ProcessPropertiesTest`, GR-24075), 4 failures
+  in each, the same four:
+
+  | test | what it waits for |
+  |------|-------------------|
+  | `jfr.TestJavaLevelVirtualThreadEvents` | `NoClassDefFoundError: Could not initialize class jdk.internal.vm.Continuation` in the thread body, then `Event: jdk.ThreadSleep not found in recording!` |
+  | `jfr.TestMirrorEvents` | `Event: jdk.VirtualThreadStart not found in recording!` |
+  | `jfr.TestVirtualThreadsUnreferencedStreaming` | `Unexpected thread constant pool entry for unreferenced virtual thread` |
+  | `jfr.oldobject.TestOldObjectVirtualThreadSampleEvent` | `No event thread` |
+
+  `ContinuationsFeature.afterRegistration` (`ContinuationsFeature.java:89`) computes
+  `supported = hostSupport && !DeoptimizationSupport.enabled() && !SubstrateOptions.useLLVMBackend()
+  && SubstrateControlFlowIntegrity.singleton().continuationsSupported()`, and when it is false the
+  image registers `jdk.internal.vm.Continuation` for run-time initialization *so that any real use
+  throws*, while `Thread.ofVirtual()` hands out a `ThreadBuilders$BoundVirtualThread` - one platform
+  thread per "virtual" thread. `-H:+VMContinuations` set by hand is refused with a message that
+  names the LLVM backend. So these four cannot pass, and the other eight virtual-thread tests in the
+  suite pass, because a bound virtual thread is all they need. Same four on both platforms:
+  a backend property, not a Windows one.
+
+- 2026-09-18 (task 2, runs https://github.com/Throwaway68/gha-graal/actions/runs/35371140266 (linux)
+  and https://github.com/Throwaway68/gha-graal/actions/runs/35371112347 (windows), blacklist graal
+  `5f37c13b287`): **`all_native_unittests` hits the `hellomodule` wall: the four test groups that
+  pass `-H:+RuntimeClassLoading` compile the Ristretto interpreter, whose bytecode handler stubs
+  need multi-value returns.** 400 compilations of
+  `Interpreter$Root.__stub_*Handler(long, long, Interpreter$Root$State, byte[], InterpreterFrame,
+  long[], Object[])` fail with `unimplemented: the LLVM backend doesn't produce an
+  LIRGenerationResult` (`LLVMGenerator.getResult` <- `LIRGeneratorTool.emitMultiReturns` <-
+  `ReturnNode.generate`) and the junit image of `GetPackageRuntimeClassLoadingTest` gives up after
+  2m56s. Identical on both platforms, and the two groups built before it in the same batch
+  (`ArrayMetadataTracingTest`, `FeatureSingletonCompatibilityTest`) build and run fine. This is the
+  task-1 finding on `hellomodule` reaching a second tag, so the four classes are blacklisted with a
+  pointer to it rather than investigated again.
+
+- 2026-09-18 (task 2, runs https://github.com/Throwaway68/gha-graal/actions/runs/35370064787 and
+  https://github.com/Throwaway68/gha-graal/actions/runs/35372826559, fix graal `ffcc40a2601`):
+  **the first Windows-only failure of this round - a large image is killed by the image generator's
+  deadlock watchdog while `llvm-link` is running, and it is not deadlocked, it is slow.**
+  `java.desktop integration tests` on windows-amd64 dumps every stack trace after ten minutes:
+
+  ```
+  === Image generator watchdog detected no activity. ...
+  "main" Id=3 in RUNNABLE (running in native)
+      at java.io.FileInputStream.readBytes(Native Method)
+      ... at com.oracle.svm.hosted.image.LLVMToolchain.runCommand(LLVMToolchain.java:68)
+      at ...LLVMToolchainUtils.llvmLink(LLVMToolchainUtils.java:125)
+      at ...LLVMNativeImageCodeCache.lambda$createBitcodeBatches$1(LLVMNativeImageCodeCache.java:198)
+  ```
+
+  Every long phase of the builder calls `DeadlockWatchdog.recordActivity` (UniverseBuilder,
+  NativeImageHeapWriter, ResourcesFeature, ...); an external tool cannot, and
+  `CompletionExecutor.executeCommand` records activity only when a command *starts*
+  (`CompletionExecutor.java:165`). On PE/COFF `createBitcodeBatches` sets `batchSize = 0` - one
+  object, because there is no relocatable link there - so the whole image is **one** `llvm-link` and
+  **one** `llc` invocation, and nothing reports activity for their whole duration. linux-amd64
+  passes the same task in 14m49s (run 35370170311) because it links `numThreads` smaller batches and
+  each completion is an activity.
+
+  **Hypothesis H-watchdog (slow, not deadlocked) confirmed**: the same image with
+  `-H:DeadlockWatchdogInterval=45` reports `[7/8] Laying out methods... (1490.8s @ 2.78GiB)` -
+  24m51s - and goes on to the link (run 35372826559). Fix: a heartbeat thread in
+  `LLVMToolchain.runCommand` records activity once a minute *for as long as the tool's process is
+  alive*, so a genuine deadlock inside the builder, with no LLVM tool running, is still detected.
+  The gate keeps Oracle's default watchdog interval.
+
+- 2026-09-18 (task 2, run https://github.com/Throwaway68/gha-graal/actions/runs/35372826559, fix
+  graal `c0eda3552e6`): **`Math.rint` does not link on Windows: MSVC's UCRT has no `roundeven`.**
+  Past the watchdog, the `java.desktop` junit image reaches the MSVC link and dies there:
+
+  ```
+  llvm.obj : error LNK2019: unresolved external symbol roundeven referenced in function
+             JNIJavaCallVariantWrapperHolder__invokeJJI__J__VA__LIST__Nonvirtual__...
+  llvm.obj : error LNK2019: unresolved external symbol roundevenf referenced in function ...
+  svmjunit.exe : fatal error LNK1120: 2 unresolved externals
+  ```
+
+  `LLVMGenerator.emitRound(NEAREST)` - Java's `Math.rint` - emits `llvm.roundeven`
+  (`LLVMIRBuilder.buildRoundEven`). x86-64 has no instruction for it below SSE4.1 and the backend
+  compiles for the generic CPU (`-march=x86-64`, `getLLCAdditionalOptions` adds only
+  `-no-x86-call-frame-opt`), so llc lowers it to a call to the C23 library function `roundeven`.
+  glibc and the macOS libm export it; the Universal CRT does not (C23 math is not in it), and the
+  symbol is unresolved. Rounds 1-3 never hit it because no earlier image reached `Math.rint`; the
+  java.desktop image is the first.
+
+  Fix: on Windows call `nearbyint`/`nearbyintf` by name through `buildLibMUnaryOp`, exactly as the
+  backend already calls `trunc`, `pow`, `cbrt` and the rest, with the `nobuiltin` attribute that
+  helper attaches so nothing canonicalizes the call back into the intrinsic. `nearbyint` is
+  round-to-nearest-ties-to-even under the default rounding mode and, unlike `rint`, does not raise
+  inexact - i.e. it *is* `roundeven` for a VM that never changes the rounding mode, and Substrate VM
+  never does, there being no Java API for it. ELF and Mach-O keep the intrinsic.
 
 
 ## Decisions
