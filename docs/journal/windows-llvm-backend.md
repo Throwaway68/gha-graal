@@ -409,10 +409,19 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
   broke on the Win64 home space in round 1), the same JNI traffic from six threads at once with
   an upcall and a caught native exception in each of 200 iterations, and a spread of ordinary
   library code (records + sealed interface + pattern switch, regex, parallel streams, BigInteger,
-  temp-file I/O, `Method.invoke`, collectors). Configuration needed for it: a `jni-config.json` for
-  the three upcall targets plus `IllegalStateException.<init>(String)` and `RuntimeException`, and
-  `--initialize-at-build-time=Complex` - nothing else, in particular no `reflect-config.json`
-  (`getDeclaredMethod("square", int.class)` with constant arguments is folded by the analysis).
+  temp-file I/O, `Method.invoke`, collectors). Configuration needed for it: a `jni-config.json`
+  with the three upcall targets and a bare class entry for `java.lang.IllegalStateException`, plus
+  `--initialize-at-build-time=Complex` - nothing else. In particular no `reflect-config.json`
+  (`getDeclaredMethod("square", int.class)` with constant arguments is folded by the analysis), and
+  nothing for the two exception classes beyond that one entry: the `IllegalStateException` entry is
+  there because `FindClass`/`IsInstanceOf` need the class to be JNI-accessible, and neither of them
+  ever looks at a constructor; `java.lang.RuntimeException`, which native code creates with
+  `ThrowNew`, needs no entry at all because `JNIRegistrationJava.beforeAnalysis` registers it - the
+  type *and* its `<init>(String)` - unconditionally, together with ~25 other exception classes
+  ("unconditional registration is cheap"). `IllegalStateException` is not on that list, which is
+  why it needs its own entry. (Task 1 shipped two entries more than this - an
+  `IllegalStateException.<init>(String)` method and a `RuntimeException` class - both no-ops;
+  removed in round 4 task 2.)
 
   **darwin-aarch64 is green too**, at the same graal commit, after one `dev-run.sh` fix that has
   nothing to do with the backend (the bundled clang's missing macOS sysroot - Finding below): run

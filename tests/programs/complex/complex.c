@@ -1,6 +1,5 @@
 #include <jni.h>
 #include <stdint.h>
-#include <string.h>
 #include <stdio.h>
 
 /* Java -> native: arithmetic, strings, arrays. */
@@ -37,7 +36,7 @@ JNIEXPORT jint JNICALL Java_Complex_upcallSquare(JNIEnv *env, jclass cls, jint n
 }
 
 /* native -> Java where the Java side throws: the exception must be pending when the upcall
-   returns, and the native code must be able to see and clear it, then rethrow a different one. */
+   returns, and the native code must be able to see it, recognise it and clear it. */
 JNIEXPORT jint JNICALL Java_Complex_upcallThrowing(JNIEnv *env, jclass cls, jstring msg) {
     jmethodID m = (*env)->GetStaticMethodID(env, cls, "throwing", "(Ljava/lang/String;)V");
     if (m == NULL) return -1;

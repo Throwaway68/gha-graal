@@ -9,7 +9,8 @@
 # Optional parts of a program directory:
 #   javac.flags   one line of extra javac arguments (word-split on purpose)
 #   META-INF/     copied into the classpath, so native-image picks up
-#                 META-INF/native-image/<group>/<artifact>/*-config.json by itself
+#                 META-INF/native-image/<group>/<artifact>/*-config.json and its
+#                 native-image.properties (extra build arguments) by itself
 #   *.c           compiled by the bundled clang into one shared library named after the
 #                 program; the program is then run with -D<name>.lib=<absolute path>
 set -euo pipefail
