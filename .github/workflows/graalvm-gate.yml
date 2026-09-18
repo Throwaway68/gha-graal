@@ -21,6 +21,12 @@ name: GraalVM gate
 # "how the gate finds the LLVM backend" (2026-09-18).
 
 on:
+  # TEMPORARY (removed in the next commit): `workflow_dispatch` only exists for workflows that are
+  # on the default branch, so a brand new one cannot be dispatched at all until GitHub has seen it
+  # run once. This push trigger registers it; the job itself is skipped.
+  push:
+    branches: [round3-gate]
+    paths: ['.github/workflows/graalvm-gate.yml']
   workflow_dispatch:
     inputs:
       graal_ref:
@@ -65,6 +71,7 @@ env:
 
 jobs:
   gate:
+    if: github.event_name != 'push'   # TEMPORARY, see the push trigger above
     name: ${{ inputs.platform }} / ${{ inputs.tags }}
     runs-on: ${{ inputs.platform == 'windows-amd64' && 'windows-2022' || inputs.platform == 'darwin-aarch64' && 'macos-14' || 'ubuntu-22.04' }}
     # The gate builds substratevm and its GraalVM home before the first image; on windows-amd64
