@@ -214,6 +214,20 @@ jobs:
         run: |
           "${MX_PYTHON:-python3}" ci/scripts/graalvm/gate-summary.py "$GITHUB_WORKSPACE/gate.log" \
             | tee "$GITHUB_WORKSPACE/gate-summary.txt"
+      # TEMPORARY (round 3 review, task 2): verifies the *standalone* native-unittest path, the
+      # `mx native-unittest ... --tool:llvm-backend -- <class>` command the port debugs single test
+      # classes with. It is a separate code path from the gate tasks and it was still broken after
+      # task 2. Remove this step and `standalone.log` from the artifact once it is green.
+      - name: Standalone native-unittest under the backend (temporary)
+        if: always() && runner.os == 'Linux'
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          cd graal/substratevm
+          "$MX_PATH/mx" native-unittest \
+            --build-args -H:+UnlockExperimentalVMOptions --tool:llvm-backend \
+            -- com.oracle.svm.test.jni.JNIGlobalHandlesTest 2>&1 | tee "$GITHUB_WORKSPACE/standalone.log"
+          exit "${PIPESTATUS[0]}"
       # Interactive debugging instead of a workflow round trip per attempt: with `debug_ssh` on,
       # the job stops here - after the gate, whether it passed or failed - and publishes how to
       # reach this runner. Copied verbatim from `graalvm-dev.yml`, including the reasons; the short
@@ -289,6 +303,7 @@ jobs:
           path: |
             gate-summary.txt
             gate.log
+            standalone.log
             graal/substratevm/mxbuild/**/svmbuild/**/reports/**
             graal/substratevm/mxbuild/**/svmbuild/*.log
           if-no-files-found: ignore
