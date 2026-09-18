@@ -41,3 +41,4 @@ tests/programs/excgc/Excgc.java
 tests/programs/excgc/expected.txt
 scripts/graalvm/smoke-stress.sh
 docs/superpowers/plans/2026-09-18-windows-llvm-backend-round3.md
+docs/superpowers/plans/2026-09-18-windows-llvm-backend-round4.md
