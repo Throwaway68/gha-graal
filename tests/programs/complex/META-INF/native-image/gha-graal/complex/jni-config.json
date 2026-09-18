@@ -1,0 +1,10 @@
+[
+  { "name": "Complex",
+    "methods": [
+      { "name": "square", "parameterTypes": ["int"] },
+      { "name": "throwing", "parameterTypes": ["java.lang.String"] },
+      { "name": "describe", "parameterTypes": ["java.lang.String"] }
+    ] },
+  { "name": "java.lang.IllegalStateException", "methods": [ { "name": "<init>", "parameterTypes": ["java.lang.String"] } ] },
+  { "name": "java.lang.RuntimeException" }
+]

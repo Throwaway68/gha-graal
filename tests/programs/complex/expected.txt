@@ -1,0 +1,17 @@
+OK jni-add
+OK jni-string
+OK jni-array
+OK jni-upcall
+OK jni-upcall-string
+OK jni-upcall-throw
+OK jni-native-throw
+OK centrypoint-pointer
+OK jni-threads
+OK records-sealed-switch
+OK regex
+OK streams-format
+OK bigint
+OK file-io
+OK reflection
+OK collectors
+COMPLEX OK
