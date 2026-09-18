@@ -877,7 +877,14 @@ Every entry is dated (YYYY-MM-DD) and names the commit or workflow run it comes 
     keys in the home directory are ignored. sshd also refuses the file unless it is owned by
     Administrators/SYSTEM alone, hence the `icacls /inheritance:r` line. The keys themselves are the
     dispatching account's (`https://github.com/<actor>.keys`), the same rule as tmate's
-    `limit-access-to-actor`.
+    `limit-access-to-actor`. `PasswordAuthentication no` is not enough on its own: the stock
+    Windows sshd_config carries no `KbdInteractiveAuthentication` line at all (run 35327752826), so
+    that default-on, password-backed method would stay open for an administrator account. The
+    script prepends `AuthenticationMethods publickey` and `KbdInteractiveAuthentication no` -
+    prepended because sshd takes a keyword's first value and because the file ends in the `Match`
+    block. Verified from the Mac in run 35328169055: key auth gets a shell, while
+    `ssh -o PreferredAuthentications=keyboard-interactive,password -o PubkeyAuthentication=no`
+    is answered with `Permission denied (publickey)`.
   - **`DefaultShell` needs `DefaultShellCommandOption` beside it.** `HKLM:\SOFTWARE\OpenSSH\DefaultShell`
     = Git bash gives `MINGW64_NT-10.0-20348 ... x86_64 Msys` as the login shell, but sshd builds a
     non-interactive `ssh <host> '<command>'` as `<shell> <DefaultShellCommandOption> <command>`,
