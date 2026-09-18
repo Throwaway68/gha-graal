@@ -39,3 +39,4 @@ tests/programs/overflow/Overflow.java
 tests/programs/overflow/expected.txt
 tests/programs/excgc/Excgc.java
 tests/programs/excgc/expected.txt
+scripts/graalvm/smoke-stress.sh

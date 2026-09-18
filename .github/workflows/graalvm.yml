@@ -147,7 +147,14 @@ jobs:
           echo GRAALVM_HOME=%GRAALVM_HOME%>>%GITHUB_ENV%
       - name: Smoke test
         shell: bash
-        run: bash ci/scripts/graalvm/smoke.sh "$GRAALVM_HOME" "$GITHUB_WORKSPACE/smoke"
+        run: |
+          bash ci/scripts/graalvm/smoke.sh "$GRAALVM_HOME" "$GITHUB_WORKSPACE/smoke"
+          # smoke.sh stops at a hello world. Where the LLVM backend is registered,
+          # also build and run tests/programs/stress, which is what tells us the
+          # backend survives exceptions, the GC and threads.
+          if [ -d "$GRAALVM_HOME/lib/svm/tools/llvm-backend" ] || [ -d "$GRAALVM_HOME/lib/svm/macros/llvm-backend" ]; then
+            bash ci/scripts/graalvm/smoke-stress.sh "$GRAALVM_HOME" "$GITHUB_WORKSPACE/stress"
+          fi
       - name: Package
         shell: bash
         run: bash ci/scripts/graalvm/package.sh "$GRAALVM_HOME" "graalvm-$LABEL-${{ matrix.platform }}" "${{ matrix.platform }}" "$GITHUB_WORKSPACE/out"
@@ -210,7 +217,7 @@ jobs:
           GraalVM CE built from \`Throwaway68/graal@${{ inputs.graal_ref }}\` with the LLVM toolchain from release \`${{ inputs.llvm_release }}\`.
           Platforms in this release: ${{ inputs.platforms }}.
           Components: CE base, LLVM.org toolchain, Sulong (LLVM runtime), Native Image LLVM backend where the branch registers it.
-          Native Image LLVM backend: linux-amd64, windows-amd64 (round 1, hello world), darwin-aarch64 (registered, not yet green: see journal).
+          Native Image LLVM backend: linux-amd64 and windows-amd64 build and run \`tests/programs/stress\` (exceptions, GC, threads) in this run's smoke test; darwin-aarch64 is registered but not yet green (see journal).
           The Windows backend needs \`llvm-22.1.8-graal.3\` or newer: it carries the Win64 home-space fix for \`CallingConv::GRAAL\` and libunwind for \`x86_64-w64-windows-gnu\`.
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EOF
